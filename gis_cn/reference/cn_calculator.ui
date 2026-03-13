@@ -1,0 +1,521 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>CnCalculatorDialog</class>
+ <widget class="QDialog" name="CnCalculatorDialog">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>640</width><height>740</height></rect>
+  </property>
+  <property name="windowTitle">
+   <string>CN값 계산기</string>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="spacing"><number>0</number></property>
+   <property name="leftMargin"><number>0</number></property>
+   <property name="topMargin"><number>0</number></property>
+   <property name="rightMargin"><number>0</number></property>
+   <property name="bottomMargin"><number>0</number></property>
+
+   <!-- ── 헤더 ── -->
+   <item>
+    <widget class="QFrame" name="frameHeader">
+     <property name="styleSheet">
+      <string>QFrame#frameHeader { background-color: white; border-bottom: 1px solid #e5e7eb; }</string>
+     </property>
+     <property name="minimumHeight"><number>56</number></property>
+     <property name="maximumHeight"><number>56</number></property>
+     <layout class="QHBoxLayout" name="hLayoutHeader">
+      <property name="leftMargin"><number>20</number></property>
+      <property name="rightMargin"><number>20</number></property>
+      <property name="topMargin"><number>0</number></property>
+      <property name="bottomMargin"><number>0</number></property>
+      <item>
+       <widget class="QLabel" name="lblTitle">
+        <property name="text"><string>CN값 계산기</string></property>
+        <property name="styleSheet">
+         <string>font-size: 17px; font-weight: bold; color: #1f2937; border: none;</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <spacer>
+        <property name="orientation"><enum>Qt::Horizontal</enum></property>
+       </spacer>
+      </item>
+      <item>
+       <widget class="QLabel" name="lblSubtitle">
+        <property name="text"><string>유역 CN값 산정 도구</string></property>
+        <property name="styleSheet">
+         <string>font-size: 11px; color: #9ca3af; border: none;</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+
+   <!-- ── 탭 위젯 ── -->
+   <item>
+    <widget class="QTabWidget" name="tabWidget">
+     <property name="currentIndex"><number>0</number></property>
+
+     <!-- ══════════════ Tab 0: CN값 계산 ══════════════ -->
+     <widget class="QWidget" name="tabCnCalc">
+      <attribute name="title"><string>레이어 불러오기</string></attribute>
+      <layout class="QVBoxLayout" name="vLayoutTab1">
+       <property name="spacing"><number>12</number></property>
+       <property name="leftMargin"><number>16</number></property>
+       <property name="topMargin"><number>16</number></property>
+       <property name="rightMargin"><number>16</number></property>
+       <property name="bottomMargin"><number>16</number></property>
+
+       <!-- 소유역 레이어 입력 카드 -->
+       <item>
+        <widget class="QFrame" name="cardInput">
+         <property name="styleSheet">
+          <string>QFrame#cardInput { background-color: white; border: 1px solid #e5e7eb; border-radius: 8px; }</string>
+         </property>
+         <layout class="QVBoxLayout" name="vLayoutCardInput">
+          <property name="spacing"><number>10</number></property>
+          <property name="leftMargin"><number>16</number></property>
+          <property name="topMargin"><number>14</number></property>
+          <property name="rightMargin"><number>16</number></property>
+          <property name="bottomMargin"><number>14</number></property>
+          <item>
+           <widget class="QLabel" name="lblInputTitle">
+            <property name="text"><string>소유역 레이어 입력</string></property>
+            <property name="styleSheet">
+             <string>font-size: 14px; font-weight: bold; color: #374151; border: none;</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="hLayoutFile">
+            <item>
+             <widget class="QRadioButton" name="rbFile">
+              <property name="text"><string>파일 선택</string></property>
+              <property name="checked"><bool>true</bool></property>
+              <property name="minimumWidth"><number>80</number></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QLineEdit" name="leFilePath">
+              <property name="placeholderText"><string>SHP / GeoPackage 경로</string></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="btnBrowse">
+              <property name="text"><string>찾아보기</string></property>
+              <property name="maximumWidth"><number>80</number></property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="hLayoutLayer">
+            <item>
+             <widget class="QRadioButton" name="rbLayer">
+              <property name="text"><string>현재 레이어</string></property>
+              <property name="minimumWidth"><number>80</number></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QComboBox" name="cmbLayer">
+              <property name="enabled"><bool>false</bool></property>
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+                <horstretch>1</horstretch><verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="hLayoutNameField">
+            <item>
+             <widget class="QLabel" name="lblNameField">
+              <property name="text"><string>소유역명 컬럼</string></property>
+              <property name="styleSheet"><string>color: #6b7280; font-size: 13px; border: none;</string></property>
+              <property name="minimumWidth"><number>90</number></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QComboBox" name="cmbNameField">
+              <property name="minimumWidth"><number>180</number></property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="spacerNameField">
+              <property name="orientation"><enum>Qt::Horizontal</enum></property>
+             </spacer>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- 토지피복 분류 카드 -->
+       <item>
+        <widget class="QFrame" name="cardClassify">
+         <property name="styleSheet">
+          <string>QFrame#cardClassify { background-color: white; border: 1px solid #e5e7eb; border-radius: 8px; }</string>
+         </property>
+         <layout class="QHBoxLayout" name="hLayoutCardClassify">
+          <property name="spacing"><number>16</number></property>
+          <property name="leftMargin"><number>16</number></property>
+          <property name="topMargin"><number>12</number></property>
+          <property name="rightMargin"><number>16</number></property>
+          <property name="bottomMargin"><number>12</number></property>
+          <item>
+           <widget class="QLabel" name="lblClassifyTitle">
+            <property name="text"><string>토지피복 분류</string></property>
+            <property name="styleSheet">
+             <string>font-size: 14px; font-weight: bold; color: #374151; border: none;</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <spacer>
+            <property name="orientation"><enum>Qt::Horizontal</enum></property>
+           </spacer>
+          </item>
+          <item>
+           <widget class="QRadioButton" name="rbL1">
+            <property name="text"><string>대분류 (l1)</string></property>
+            <property name="checked"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QRadioButton" name="rbL2">
+            <property name="text"><string>중분류 (l2)</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QRadioButton" name="rbL3">
+            <property name="text"><string>세분류 (l3)</string></property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- 옵션 -->
+       <item>
+        <widget class="QCheckBox" name="chkShowIntermediate">
+         <property name="text"><string>중간 레이어(토양군 Clip, 토지피복 Clip) 캔버스에 표시</string></property>
+         <property name="styleSheet"><string>color: #6b7280; font-size: 12px;</string></property>
+        </widget>
+       </item>
+
+       <!-- 진행바 -->
+       <item>
+        <widget class="QProgressBar" name="progressBar">
+         <property name="value"><number>0</number></property>
+         <property name="textVisible"><bool>false</bool></property>
+         <property name="maximumHeight"><number>6</number></property>
+        </widget>
+       </item>
+
+       <!-- 로그창 -->
+       <item>
+        <widget class="QTextEdit" name="txtLog">
+         <property name="readOnly"><bool>true</bool></property>
+         <property name="minimumHeight"><number>180</number></property>
+         <property name="placeholderText"><string>실행 로그가 여기에 표시됩니다...</string></property>
+         <property name="font"><font><family>Consolas</family><pointsize>9</pointsize></font></property>
+        </widget>
+       </item>
+
+       <!-- 버튼 -->
+       <item>
+        <layout class="QHBoxLayout" name="hLayoutButtons">
+         <item>
+          <spacer name="spacerButtons">
+           <property name="orientation"><enum>Qt::Horizontal</enum></property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnRun">
+           <property name="text"><string>실행</string></property>
+           <property name="minimumWidth"><number>100</number></property>
+           <property name="minimumHeight"><number>36</number></property>
+           <property name="default"><bool>true</bool></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnClose">
+           <property name="text"><string>닫기</string></property>
+           <property name="minimumWidth"><number>80</number></property>
+           <property name="minimumHeight"><number>36</number></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnNextStep0">
+           <property name="text"><string>다음 단계 →</string></property>
+           <property name="minimumWidth"><number>110</number></property>
+           <property name="minimumHeight"><number>36</number></property>
+           <property name="styleSheet"><string>QPushButton { border: 1px solid #374151; color: #374151; border-radius: 6px; padding: 6px 16px; font-weight: 600; background: white; } QPushButton:hover { background-color: #f3f4f6; }</string></property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+
+      </layout>
+     </widget>
+     <!-- ══════════════ End Tab 0 ══════════════ -->
+
+     <!-- ══════════════ Tab 1: CN값 편집 ══════════════ -->
+     <widget class="QWidget" name="tabCnEdit">
+      <attribute name="title"><string>CN값 편집</string></attribute>
+      <layout class="QVBoxLayout" name="vLayoutTab2">
+       <property name="spacing"><number>10</number></property>
+       <property name="leftMargin"><number>16</number></property>
+       <property name="topMargin"><number>16</number></property>
+       <property name="rightMargin"><number>16</number></property>
+       <property name="bottomMargin"><number>16</number></property>
+
+       <!-- 툴바 버튼 행 -->
+       <item>
+        <layout class="QHBoxLayout" name="hLayoutCnEditBtns">
+         <property name="spacing"><number>6</number></property>
+         <item>
+          <widget class="QPushButton" name="btnAddRow">
+           <property name="text"><string>+ 행 추가</string></property>
+           <property name="toolTip"><string>새 토지이용 항목 행을 추가합니다</string></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnDeleteRow">
+           <property name="text"><string>- 행 삭제</string></property>
+           <property name="toolTip"><string>선택한 행을 삭제합니다</string></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnAddColumn">
+           <property name="text"><string>+ 열 추가</string></property>
+           <property name="toolTip"><string>새 토양군 열을 추가합니다</string></property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="spacerCnBtns">
+           <property name="orientation"><enum>Qt::Horizontal</enum></property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnReloadCn">
+           <property name="text"><string>기본값</string></property>
+           <property name="toolTip"><string>cn_value.xlsx의 기본 CN값을 불러옵니다</string></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnImportCn">
+           <property name="text"><string>불러오기</string></property>
+           <property name="toolTip"><string>저장된 CN값 파일(.xlsx)을 불러옵니다</string></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnSaveCn">
+           <property name="text"><string>내보내기</string></property>
+           <property name="toolTip"><string>현재 CN값 테이블을 파일로 내보냅니다</string></property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+
+       <!-- CN값 테이블 -->
+       <item>
+        <widget class="QTableWidget" name="tblCnValues">
+         <property name="alternatingRowColors"><bool>true</bool></property>
+         <property name="selectionMode">
+          <enum>QAbstractItemView::SingleSelection</enum>
+         </property>
+         <property name="selectionBehavior">
+          <enum>QAbstractItemView::SelectItems</enum>
+         </property>
+         <property name="editTriggers">
+          <set>QAbstractItemView::DoubleClicked|QAbstractItemView::EditKeyPressed|QAbstractItemView::AnyKeyPressed</set>
+         </property>
+         <property name="sortingEnabled"><bool>false</bool></property>
+         <column><property name="text"><string>토지이용분류</string></property></column>
+         <column><property name="text"><string>A</string></property></column>
+         <column><property name="text"><string>B</string></property></column>
+         <column><property name="text"><string>C</string></property></column>
+         <column><property name="text"><string>D</string></property></column>
+        </widget>
+       </item>
+
+       <!-- 안내 -->
+       <item>
+        <widget class="QLabel" name="lblCnEditNote">
+         <property name="text">
+          <string>※ 셀을 더블클릭하여 수정합니다. [내보내기]로 파일에 저장, [불러오기]로 재활용하세요.</string>
+         </property>
+         <property name="styleSheet"><string>color: #9ca3af; font-size: 11px;</string></property>
+        </widget>
+       </item>
+
+       <!-- 다음 단계 버튼 -->
+       <item>
+        <layout class="QHBoxLayout" name="hLayoutCnEditNext">
+         <item>
+          <spacer name="spacerCnEditNext">
+           <property name="orientation"><enum>Qt::Horizontal</enum></property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnNextStep2">
+           <property name="text"><string>다음 단계 →</string></property>
+           <property name="minimumWidth"><number>110</number></property>
+           <property name="minimumHeight"><number>36</number></property>
+           <property name="styleSheet"><string>QPushButton { border: 1px solid #374151; color: #374151; border-radius: 6px; padding: 6px 16px; font-weight: 600; background: white; } QPushButton:hover { background-color: #f3f4f6; }</string></property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+
+      </layout>
+     </widget>
+     <!-- ══════════════ End Tab 1 ══════════════ -->
+
+     <!-- ══════════════ Tab 2(→3 after insert): 최종 계산 ══════════════ -->
+     <widget class="QWidget" name="tabRecalc">
+      <attribute name="title"><string>최종 계산</string></attribute>
+      <layout class="QVBoxLayout" name="vLayoutTab3">
+       <property name="spacing"><number>12</number></property>
+       <property name="leftMargin"><number>16</number></property>
+       <property name="topMargin"><number>16</number></property>
+       <property name="rightMargin"><number>16</number></property>
+       <property name="bottomMargin"><number>16</number></property>
+
+       <!-- 레이어 + 폴더 입력 카드 -->
+       <item>
+        <widget class="QFrame" name="cardRecalcInput">
+         <property name="styleSheet">
+          <string>QFrame#cardRecalcInput { background-color: white; border: 1px solid #e5e7eb; border-radius: 8px; }</string>
+         </property>
+         <layout class="QVBoxLayout" name="vLayoutCardRecalcInput">
+          <property name="spacing"><number>10</number></property>
+          <property name="leftMargin"><number>16</number></property>
+          <property name="topMargin"><number>14</number></property>
+          <property name="rightMargin"><number>16</number></property>
+          <property name="bottomMargin"><number>14</number></property>
+          <item>
+           <widget class="QLabel" name="lblRecalcInputTitle">
+            <property name="text"><string>출력 설정</string></property>
+            <property name="styleSheet">
+             <string>font-size: 14px; font-weight: bold; color: #374151; border: none;</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="hLayoutRecalcLayer">
+            <item>
+             <widget class="QLabel" name="lblRecalcLayer">
+              <property name="text"><string>CN값_input 레이어</string></property>
+              <property name="styleSheet"><string>color: #6b7280; font-size: 13px; border: none;</string></property>
+              <property name="minimumWidth"><number>110</number></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QComboBox" name="cmbRecalcLayer">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+                <horstretch>1</horstretch><verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="hLayoutOutputDir">
+            <item>
+             <widget class="QLabel" name="lblOutputDir">
+              <property name="text"><string>결과 저장 폴더</string></property>
+              <property name="styleSheet"><string>color: #6b7280; font-size: 13px; border: none;</string></property>
+              <property name="minimumWidth"><number>110</number></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QLineEdit" name="leOutputDir">
+              <property name="placeholderText"><string>result1.xlsx, result2.xlsx 저장 위치</string></property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="btnOutputDir">
+              <property name="text"><string>찾아보기</string></property>
+              <property name="maximumWidth"><number>80</number></property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- 로그 -->
+       <item>
+        <widget class="QTextEdit" name="txtRecalcLog">
+         <property name="readOnly"><bool>true</bool></property>
+         <property name="minimumHeight"><number>120</number></property>
+         <property name="placeholderText"><string>실행 로그가 여기에 표시됩니다...</string></property>
+         <property name="font"><font><family>Consolas</family><pointsize>9</pointsize></font></property>
+        </widget>
+       </item>
+
+       <!-- 안내 -->
+       <item>
+        <widget class="QLabel" name="lblRecalcNote">
+         <property name="text">
+          <string>※ CN값_input 레이어가 없으면 먼저 [레이어 불러오기] 탭에서 실행 후 [CN값 계산] 탭에서 계산하세요.</string>
+         </property>
+         <property name="styleSheet"><string>color: #9ca3af; font-size: 11px;</string></property>
+        </widget>
+       </item>
+
+       <item>
+        <spacer name="spacerRecalc">
+         <property name="orientation"><enum>Qt::Vertical</enum></property>
+        </spacer>
+       </item>
+
+       <!-- 내보내기 버튼 -->
+       <item>
+        <layout class="QHBoxLayout" name="hLayoutRecalcBtn">
+         <item>
+          <spacer name="spacerRecalcBtn">
+           <property name="orientation"><enum>Qt::Horizontal</enum></property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnExportResult1">
+           <property name="text"><string>결과 내보내기</string></property>
+           <property name="minimumWidth"><number>130</number></property>
+           <property name="minimumHeight"><number>36</number></property>
+           <property name="toolTip"><string>유역별 토지이용 상세 CN값 표 (result1.xlsx)</string></property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="btnExportResult2">
+           <property name="text"><string>result2 내보내기</string></property>
+           <property name="minimumWidth"><number>130</number></property>
+           <property name="minimumHeight"><number>36</number></property>
+           <property name="toolTip"><string>유역별 CN값 요약 (result2.xlsx)</string></property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+
+      </layout>
+     </widget>
+     <!-- ══════════════ End Tab 2(→3) ══════════════ -->
+
+    </widget>
+   </item>
+
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
