@@ -1288,20 +1288,33 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.btnWsGroupLoad.clicked.connect(self._ws_group_load)
 
     def _get_watershed_names(self) -> list:
-        """입력 레이어에서 소유역명 고유값 목록을 반환."""
-        if not hasattr(self, 'input_layer') or self.input_layer is None:
-            return []
-        if not self._last_name_field:
-            return []
-        try:
-            names = sorted({
-                str(f[self._last_name_field])
-                for f in self.input_layer.getFeatures()
-                if f[self._last_name_field] and str(f[self._last_name_field]).strip()
-            })
-            return names
-        except Exception:
-            return []
+        """소유역명 고유값 목록을 반환. 입력 레이어 → CN값_input 폴백."""
+        # 1) 입력 레이어에서 조회
+        if hasattr(self, 'input_layer') and self.input_layer is not None and self._last_name_field:
+            try:
+                names = sorted({
+                    str(f[self._last_name_field])
+                    for f in self.input_layer.getFeatures()
+                    if f[self._last_name_field] and str(f[self._last_name_field]).strip()
+                })
+                if names:
+                    return names
+            except Exception:
+                pass
+        # 2) CN값_input 레이어에서 폴백 조회
+        for lyr in QgsProject.instance().mapLayers().values():
+            if lyr.type() == QgsMapLayerType.VectorLayer and lyr.name() == "CN값_input":
+                try:
+                    names = sorted({
+                        str(f['소유역명'])
+                        for f in lyr.getFeatures()
+                        if f['소유역명'] and str(f['소유역명']).strip()
+                    })
+                    if names:
+                        return names
+                except Exception:
+                    pass
+        return []
 
     def _ws_create_combo(self, ws_names: list, selected: str = '') -> 'QComboBox':
         """소유역 선택용 콤보박스 생성."""
@@ -1322,13 +1335,24 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         return cmb
 
     def _ws_group_add_row(self):
+        ws_names = self._get_watershed_names()
+        if not ws_names:
+            reply = QMessageBox.question(
+                self, "소유역 데이터 없음",
+                "소유역 목록을 불러올 수 없습니다.\n"
+                "[레이어 불러오기] 탭에서 먼저 실행하거나,\n"
+                "CN값 계산을 먼저 수행하세요.\n\n"
+                "소유역명을 직접 입력하시겠습니까?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
         tbl = self.tblWsGroups
         row = tbl.rowCount()
         tbl.insertRow(row)
         # 그룹명은 텍스트 입력
         tbl.setItem(row, 0, QTableWidgetItem(''))
         # 소유역 열은 콤보박스
-        ws_names = self._get_watershed_names()
         for c in range(1, tbl.columnCount()):
             cmb = self._ws_create_combo(ws_names)
             tbl.setCellWidget(row, c, cmb)
