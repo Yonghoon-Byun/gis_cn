@@ -105,7 +105,7 @@ PostGIS CTE 단일 쿼리로 아래를 일괄 처리:
 | 인덱스 | 탭명 | 위젯명/생성 | 주요 위젯 |
 |--------|------|------------|---------|
 | Tab 0 | 레이어 불러오기 | `tabCnCalc` (.ui) | rbFile/rbLayer, leFilePath, cmbNameField, rbL1/L2/L3, progressBar, txtLog, btnRun, btnClose, btnNextStep0 |
-| Tab 1 | 토지이용 재분류 | `_setup_mapping_tab()` (동적) | QSplitter(좌: tblMapping + 버튼, 우: tblCnRef + leCnRefSearch), btnMappingLoadLayer, btnMappingAddRow, btnMappingDeleteRow, btnMappingSave, btnMappingClear, btnNextStep1 |
+| Tab 1 | 토지이용 재분류 | `_setup_mapping_tab()` (동적) | tblMapping + 버튼, btnCnRefPopup(CN표 참조 팝업), btnMappingLoadLayer, btnMappingAddRow, btnMappingDeleteRow, btnMappingSave, btnMappingClear, btnNextStep1 |
 | Tab 2 | CN값 편집 | `tabCnEdit` (.ui) | tblCnValues, btnAddRow, btnDeleteRow, btnAddColumn, btnReloadCn(기본값), btnImportCn(불러오기), btnSaveCn(내보내기), btnNextStep2 |
 | Tab 3 | CN값 계산 | `tabRecalc` (.ui, 동적 삽입 후 index 3) | btnApplyCn(CN값 계산 실행, 동적), cmbRecalcLayer, leOutputDir, btnOutputDir, txtRecalcLog, btnExportResult1(결과 내보내기) |
 
@@ -122,7 +122,7 @@ TAB_RECALC  = 3   # CN값 계산 (원래 .ui의 tab index 2가 3으로 이동)
 2. `_enhance_recalc_tab()` → `widget(TAB_RECALC).layout().insertWidget(0, card)` 로 CN값 계산 카드 추가
 
 ### 탭별 로직
-- **Tab 1 (토지이용 재분류)**: 최초 진입 시 `_mapping_load_saved()` → `land_use_mapping.json` 자동 로드 + `_load_cn_ref_table()` → CN표 참조 패널 자동 로드. `btnMappingLoadLayer`는 캔버스의 **토양군_토지피복_교차** 레이어에서 분류 수준(`_get_level()`)에 따라 `l1_name`/`l2_name`/`l3_name` 컬럼의 고유값을 불러와 원본 열에 채움. **재분류 열은 `_MappingComboDelegate`로 CN표 토지이용분류 드롭다운 제공**. 우측 CN표 참조 패널(`tblCnRef`)은 읽기 전용이며 검색(`leCnRefSearch`) + 더블클릭 자동입력 지원. Tab 2에서 CN표 편집 시 `_cn_ref_dirty` 플래그로 자동 동기화.
+- **Tab 1 (토지이용 재분류)**: 최초 진입 시 `_mapping_load_saved()` → `land_use_mapping.json` 자동 로드 + `_load_cn_ref_table()` → CN참조 DataFrame 로드. `btnMappingLoadLayer`는 캔버스의 **토양군_토지피복_교차** 레이어에서 분류 수준(`_get_level()`)에 따라 `l1_name`/`l2_name`/`l3_name` 컬럼의 고유값을 불러와 원본 열에 채움. **재분류 열은 `_MappingComboDelegate`로 CN표 토지이용분류 드롭다운 제공**. `btnCnRefPopup` 클릭 시 `_CnRefDialog` 팝업 표시 — 검색 + 더블클릭 자동입력 지원. Tab 2에서 CN표 편집 시 `_cn_ref_dirty` 플래그로 자동 동기화.
 - **Tab 2 (CN값 편집)**: `cn_value.xlsx`를 기본값으로 보호. `btnReloadCn`(기본값) → cn_value.xlsx 초기화. `btnImportCn`(불러오기) → 파일 선택 로드. `btnSaveCn`(내보내기) → 파일 선택 저장. CN 계산 시 위젯 테이블 데이터 우선 사용(`_get_cn_table_from_widget()`).
 - **Tab 3 (CN값 계산)**: `btnApplyCn`(CN값 계산 실행) → `_apply_cn_calc()` → `self._final_intersect_layer` 기반 ⑤⑥⑦ 실행 → `CN값_input` 생성. `btnExportResult1`(결과 내보내기) → `results.xlsx` (result1+result2 시트 통합).
 
@@ -134,12 +134,13 @@ TAB_RECALC  = 3   # CN값 계산 (원래 .ui의 tab index 2가 3으로 이동)
 ### Enter키 → 다음 셀 이동
 `_NextCellDelegate` (QStyledItemDelegate 서브클래스)가 `tblCnValues`와 `tblMapping` 0번 열에 설정되어 있다. Enter/Return 키 입력 시 현재 셀 편집을 완료하고 오른쪽 다음 셀(행 끝이면 다음 행 첫 셀)로 자동 이동한다. `tblMapping` 1번 열은 `_MappingComboDelegate`가 담당하며, Enter키 시 다음 행 동일 열로 이동한다.
 
-### 토지이용 재분류 UX 개선 (Tab 1 Split View)
-Tab 1은 `QSplitter`로 좌우 분할:
-- **좌측**: 매핑 테이블 (`tblMapping`) — 0번 열(원본): `_NextCellDelegate`, 1번 열(재분류): `_MappingComboDelegate` (CN표 토지이용분류 드롭다운)
-- **우측**: CN값 참조 패널 (`tblCnRef`, 읽기 전용) — 검색란(`leCnRefSearch`) + 더블클릭 → 매핑 행 재분류명 자동 입력
+### 토지이용 재분류 UX 개선 (Tab 1 + CN표 참조 팝업)
+Tab 1 매핑 테이블:
+- **매핑 테이블** (`tblMapping`) — 0번 열(원본): `_NextCellDelegate`, 1번 열(재분류): `_MappingComboDelegate` (CN표 토지이용분류 드롭다운)
+- **CN표 참조 팝업** (`_CnRefDialog`): `btnCnRefPopup` 클릭 시 별도 팝업 창 표시 — 검색란 + 더블클릭 → 매핑 행 재분류명 자동 입력 (`value_selected` 시그널 → `_on_cn_ref_value_selected()`)
 - **유효성 피드백**: 재분류명이 CN표에 있으면 초록(`#f0fdf4`), 없으면 빨강(`#fef2f2`) 배경
-- **동기화**: Tab 2에서 CN표 편집 시 `_cn_ref_dirty = True` → Tab 1 복귀 시 `_sync_cn_ref_from_edit()` 자동 호출
+- **동기화**: Tab 2에서 CN표 편집 시 `_cn_ref_dirty = True` → 팝업 열 때 `_sync_cn_ref_from_edit()` 자동 호출
+- **데이터 저장**: CN참조 데이터는 `self._cn_ref_df` (DataFrame)에 보관, 팝업은 `self._cn_ref_popup` (`_CnRefDialog` 인스턴스)으로 재사용
 
 ## 토지이용 재분류 (land_use_mapper.py)
 
