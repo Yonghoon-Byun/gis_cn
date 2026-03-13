@@ -453,6 +453,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
     def _init_ui(self):
         self.setStyleSheet(DIALOG_STYLESHEET)
+        self.setMinimumWidth(1100)
+        self.resize(1100, 700)
         self.progressBar.setValue(0)
         self._refresh_layer_list()
         self._toggle_input_mode()
@@ -1153,6 +1155,10 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.tblCnRef.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tblCnRef.verticalHeader().setDefaultSectionSize(32)
         self.tblCnRef.verticalHeader().setVisible(False)
+        self.tblCnRef.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for c in range(1, 5):
+            self.tblCnRef.horizontalHeader().setSectionResizeMode(c, QHeaderView.Fixed)
+            self.tblCnRef.setColumnWidth(c, 45)
         ref_layout.addWidget(self.tblCnRef, 1)
 
         # ── QSplitter (좌: 매핑 테이블, 우: CN참조 패널) ─────────────
