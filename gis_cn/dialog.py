@@ -551,9 +551,18 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
     def _on_file_path_changed(self):
         path = self.leFilePath.text().strip()
         if path and os.path.exists(path):
-            layer = QgsVectorLayer(path, "_check", "ogr")
+            name = os.path.splitext(os.path.basename(path))[0]
+            layer = QgsVectorLayer(path, name, "ogr")
             if layer.isValid():
                 self._populate_name_fields(layer)
+                # 캔버스에 레이어 추가 (중복 방지)
+                existing = [
+                    lyr for lyr in QgsProject.instance().mapLayers().values()
+                    if lyr.source() == layer.source()
+                ]
+                if not existing:
+                    QgsProject.instance().addMapLayer(layer)
+                    self.iface.zoomToActiveLayer()
 
     def _on_layer_changed(self):
         if self.rbLayer.isChecked():
