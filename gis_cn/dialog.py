@@ -927,9 +927,15 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             groups = self._get_watershed_groups()
             grouped_r1, grouped_r2 = None, None
             if groups:
-                self._recalc_log(f"  유역합성 {len(groups)}개 그룹 계산 중...")
-                grouped_r1, grouped_r2 = calculate_grouped_results(layer, groups)
-                self._recalc_log(f"  유역합성 계산 완료: {len(grouped_r1)}개 그룹")
+                try:
+                    self._recalc_log(f"  유역합성 {len(groups)}개 그룹 계산 중...")
+                    grouped_r1, grouped_r2 = calculate_grouped_results(layer, groups)
+                    self._recalc_log(f"  유역합성 계산 완료: {len(grouped_r1)}개 그룹")
+                except Exception as e:
+                    logger.exception("유역합성 계산 오류")
+                    self._recalc_log(f"  [경고] 유역합성 계산 실패: {e}")
+                    self._recalc_log(f"  → 개별 소유역 결과만 내보냅니다.")
+                    grouped_r1, grouped_r2 = None, None
 
             export_results(result1_data, result2_data, path,
                            grouped_result1=grouped_r1, grouped_result2=grouped_r2)
@@ -1289,31 +1295,45 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
     def _get_watershed_names(self) -> list:
         """소유역명 고유값 목록을 반환. 입력 레이어 → CN값_input 폴백."""
+        _INVALID = {'', 'null', 'none', 'nan'}
+
+        def _valid_name(val):
+            if val is None:
+                return None
+            try:
+                from qgis.PyQt.QtCore import QVariant
+                if isinstance(val, QVariant) and val.isNull():
+                    return None
+            except Exception:
+                pass
+            s = str(val).strip()
+            return s if s and s.lower() not in _INVALID else None
+
         # 1) 입력 레이어에서 조회
         if hasattr(self, 'input_layer') and self.input_layer is not None and self._last_name_field:
             try:
                 names = sorted({
-                    str(f[self._last_name_field])
-                    for f in self.input_layer.getFeatures()
-                    if f[self._last_name_field] and str(f[self._last_name_field]).strip()
+                    n for f in self.input_layer.getFeatures()
+                    if (n := _valid_name(f[self._last_name_field]))
                 })
                 if names:
                     return names
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"입력 레이어에서 소유역명 조회 실패: {e}")
+
         # 2) CN값_input 레이어에서 폴백 조회
         for lyr in QgsProject.instance().mapLayers().values():
-            if lyr.type() == QgsMapLayerType.VectorLayer and lyr.name() == "CN값_input":
-                try:
+            try:
+                if lyr.type() == QgsMapLayerType.VectorLayer and lyr.name() == "CN값_input":
                     names = sorted({
-                        str(f['소유역명'])
-                        for f in lyr.getFeatures()
-                        if f['소유역명'] and str(f['소유역명']).strip()
+                        n for f in lyr.getFeatures()
+                        if (n := _valid_name(f['소유역명']))
                     })
                     if names:
                         return names
-                except Exception:
-                    pass
+            except Exception as e:
+                logger.debug(f"CN값_input 레이어에서 소유역명 조회 실패: {e}")
+
         return []
 
     def _ws_create_combo(self, ws_names: list, selected: str = '') -> 'QComboBox':
@@ -1335,7 +1355,12 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         return cmb
 
     def _ws_group_add_row(self):
-        ws_names = self._get_watershed_names()
+        try:
+            ws_names = self._get_watershed_names()
+        except Exception as e:
+            logger.exception("소유역명 목록 조회 오류")
+            ws_names = []
+
         if not ws_names:
             reply = QMessageBox.question(
                 self, "소유역 데이터 없음",
@@ -1385,7 +1410,11 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         if not groups:
             QMessageBox.information(self, "불러오기", "저장된 유역합성 그룹이 없습니다.")
             return
-        ws_names = self._get_watershed_names()
+        try:
+            ws_names = self._get_watershed_names()
+        except Exception as e:
+            logger.exception("소유역명 목록 조회 오류 (불러오기)")
+            ws_names = []
         tbl = self.tblWsGroups
         tbl.setRowCount(0)
         for group_name, members in groups.items():
