@@ -9,6 +9,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTableWidget, QAbstractItemView, QFrame,
     QStyledItemDelegate, QRadioButton, QLineEdit,
+    QComboBox, QSplitter,
 )
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal, QEvent
 from qgis.core import (
@@ -278,6 +279,54 @@ class _NextCellDelegate(QStyledItemDelegate):
         return super().eventFilter(editor, event)
 
 
+class _MappingComboDelegate(QStyledItemDelegate):
+    """재분류 이름 열 전용 — CN표 토지이용분류 드롭다운 + Enter키 이동."""
+
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.setEditable(True)
+        # 매 호출 시 최신 CN표 목록 로드
+        dialog = self.parent()
+        while dialog and not isinstance(dialog, CnCalculatorDialog):
+            dialog = dialog.parent()
+        if dialog:
+            names = dialog._get_cn_land_use_names()
+            combo.addItem('')
+            combo.addItems(names)
+        combo.setStyleSheet(
+            "QComboBox { border: 1px solid #d1d5db; border-radius: 3px; padding: 1px 4px; }"
+        )
+        return combo
+
+    def setEditorData(self, editor, index):
+        val = index.data(Qt.EditRole) or ''
+        idx = editor.findText(str(val))
+        if idx >= 0:
+            editor.setCurrentIndex(idx)
+        else:
+            editor.setCurrentText(str(val))
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.currentText(), Qt.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.commitData.emit(obj)
+            self.closeEditor.emit(obj)
+            # Move to next row, same column
+            table = self.parent()
+            if table:
+                cur = table.currentIndex()
+                next_row = cur.row() + 1
+                if next_row < table.model().rowCount():
+                    table.setCurrentIndex(table.model().index(next_row, cur.column()))
+            return True
+        return super().eventFilter(obj, event)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 백그라운드 워커 스레드
 # ──────────────────────────────────────────────────────────────────────────────
@@ -394,6 +443,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self._final_intersect_layer = None
         self._last_level        = 'l1'
         self._last_name_field   = ''
+        self._cn_ref_loaded     = False
+        self._cn_ref_dirty      = False
         self.setupUi(self)
         self._init_ui()
         self._connect_signals()
@@ -461,6 +512,13 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.btnMappingDeleteRow.clicked.connect(self._mapping_delete_row)
         self.btnMappingSave.clicked.connect(self._mapping_save)
         self.btnMappingClear.clicked.connect(self._mapping_clear)
+        # Tab 1: CN표 참조 패널
+        self.tblCnRef.doubleClicked.connect(self._on_cn_ref_double_click)
+        self.leCnRefSearch.textChanged.connect(self._filter_cn_ref_table)
+        # Tab 1: 매핑 유효성 검증
+        self.tblMapping.cellChanged.connect(self._validate_mapping_cell)
+        # Tab 2: CN표 편집 시 참조 패널 dirty 플래그
+        self.tblCnValues.cellChanged.connect(lambda: setattr(self, '_cn_ref_dirty', True))
         # 다음 단계 버튼
         self.btnNextStep0.clicked.connect(lambda: self.tabWidget.setCurrentIndex(TAB_MAPPING))
         self.btnNextStep1.clicked.connect(lambda: self.tabWidget.setCurrentIndex(TAB_CN_EDIT))
@@ -504,8 +562,13 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             self._load_cn_to_table()
         elif index == TAB_RECALC:
             self._refresh_recalc_layer_list()
-        elif index == TAB_MAPPING and not self._mapping_tab_loaded:
-            self._mapping_load_saved()
+        elif index == TAB_MAPPING:
+            if not self._mapping_tab_loaded:
+                self._mapping_load_saved()
+            if not self._cn_ref_loaded:
+                self._load_cn_ref_table()
+            elif self._cn_ref_dirty:
+                self._sync_cn_ref_from_edit()
 
     def _populate_name_fields_from_layer(self):
         layer_id = self.cmbLayer.currentData()
@@ -784,6 +847,26 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             df[col] = pd.to_numeric(df[col], errors='coerce')
         return df
 
+    def _get_cn_land_use_names(self) -> list:
+        """CN값 테이블에서 토지이용분류 목록 반환."""
+        # 위젯 테이블에 데이터가 있으면 거기서 로드
+        tbl = self.tblCnValues
+        if tbl.rowCount() > 0:
+            names = []
+            for r in range(tbl.rowCount()):
+                item = tbl.item(r, 0)
+                if item and item.text().strip():
+                    names.append(item.text().strip())
+            if names:
+                return names
+        # 파일에서 폴백 로드
+        try:
+            from .core.cn_matcher import load_cn_table, XLSX_PATH
+            df = load_cn_table(XLSX_PATH)
+            return [str(v) for v in df.iloc[:, 0].dropna().tolist() if str(v).strip()]
+        except Exception:
+            return []
+
     def _cn_export(self):
         """현재 CN값 테이블을 사용자가 지정한 파일로 내보내기."""
         tbl = self.tblCnValues
@@ -978,8 +1061,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         info_lbl = QLabel(
             "토지피복도 원본 이름 → 재분류 이름으로 매핑합니다. "
-            "재분류 이름은 CN값 테이블(cn_value.xlsx)의 토지이용분류 항목과 일치해야 합니다. "
-            "저장 후 [CN값 계산] 탭의 CN값 계산 실행 시 반영됩니다."
+            "재분류 이름은 드롭다운에서 선택하거나 직접 입력할 수 있습니다. "
+            "오른쪽 CN값 참조 테이블에서 항목을 더블클릭하면 자동 입력됩니다."
         )
         info_lbl.setWordWrap(True)
         info_lbl.setStyleSheet("color: #854d0e; font-size: 12px; border: none;")
@@ -1023,7 +1106,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.tblMapping.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tblMapping.verticalHeader().setDefaultSectionSize(32)
         self.tblMapping.verticalHeader().setVisible(False)
-        self.tblMapping.setItemDelegate(_NextCellDelegate(self.tblMapping))
+        self.tblMapping.setItemDelegateForColumn(0, _NextCellDelegate(self.tblMapping))
+        self.tblMapping.setItemDelegateForColumn(1, _MappingComboDelegate(self.tblMapping))
         table_layout.addWidget(self.tblMapping)
 
         # 저장/초기화 버튼 행
@@ -1041,7 +1125,43 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         btn_row.addWidget(self.btnMappingSave)
         table_layout.addLayout(btn_row)
 
-        outer.addWidget(table_card, 1)
+        # ── CN값 참조 패널 (우측) ────────────────────────────────────────
+        ref_card = QFrame()
+        ref_card.setObjectName("cnRefCard")
+        ref_card.setStyleSheet(
+            "QFrame#cnRefCard {"
+            "  background-color: white; border: 1px solid #e5e7eb; border-radius: 8px;"
+            "}"
+        )
+        ref_layout = QVBoxLayout(ref_card)
+        ref_layout.setSpacing(8)
+        ref_layout.setContentsMargins(16, 14, 16, 14)
+
+        ref_title = QLabel("CN값 참조 테이블")
+        ref_title.setStyleSheet(
+            "font-size: 14px; font-weight: bold; color: #374151; border: none;"
+        )
+        ref_layout.addWidget(ref_title)
+
+        self.leCnRefSearch = QLineEdit()
+        self.leCnRefSearch.setPlaceholderText("검색...")
+        ref_layout.addWidget(self.leCnRefSearch)
+
+        self.tblCnRef = QTableWidget(0, 5)
+        self.tblCnRef.setHorizontalHeaderLabels(['토지이용분류', 'A', 'B', 'C', 'D'])
+        self.tblCnRef.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tblCnRef.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tblCnRef.verticalHeader().setDefaultSectionSize(32)
+        self.tblCnRef.verticalHeader().setVisible(False)
+        ref_layout.addWidget(self.tblCnRef, 1)
+
+        # ── QSplitter (좌: 매핑 테이블, 우: CN참조 패널) ─────────────
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(table_card)
+        splitter.addWidget(ref_card)
+        splitter.setSizes([550, 450])
+        splitter.setStyleSheet("QSplitter::handle { background-color: #e5e7eb; width: 2px; }")
+        outer.addWidget(splitter, 1)
 
         # 다음 단계 버튼
         next_row = QHBoxLayout()
@@ -1150,6 +1270,66 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         except Exception as e:
             QMessageBox.critical(self, "저장 오류", str(e))
 
+    def _load_cn_ref_table(self):
+        """CN값 참조 테이블 로드 (Tab 1 우측 패널)."""
+        try:
+            from .core.cn_matcher import load_cn_table, XLSX_PATH
+            df = load_cn_table(XLSX_PATH)
+        except Exception:
+            # 위젯 테이블에서 폴백
+            df = self._get_cn_table_from_widget()
+            if df is None or df.empty:
+                return
+        tbl = self.tblCnRef
+        tbl.blockSignals(True)
+        cols = list(df.columns)
+        tbl.setColumnCount(len(cols))
+        tbl.setHorizontalHeaderLabels(cols)
+        tbl.setRowCount(len(df))
+        for r, (_, row) in enumerate(df.iterrows()):
+            for c, val in enumerate(row):
+                text = "" if pd.isna(val) else str(val)
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                tbl.setItem(r, c, item)
+        tbl.blockSignals(False)
+        # Auto-resize columns
+        tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        for c in range(1, tbl.columnCount()):
+            tbl.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        self._cn_ref_loaded = True
+
+    def _filter_cn_ref_table(self, text):
+        """검색어로 CN표 참조 테이블 행 필터링."""
+        tbl = self.tblCnRef
+        search = text.strip().lower()
+        for r in range(tbl.rowCount()):
+            item = tbl.item(r, 0)
+            name = item.text().lower() if item else ''
+            tbl.setRowHidden(r, search != '' and search not in name)
+
+    def _sync_cn_ref_from_edit(self):
+        """Tab 2에서 편집된 CN표를 참조 패널에 동기화."""
+        df = self._get_cn_table_from_widget()
+        if df is not None and not df.empty:
+            tbl = self.tblCnRef
+            tbl.blockSignals(True)
+            cols = list(df.columns)
+            tbl.setColumnCount(len(cols))
+            tbl.setHorizontalHeaderLabels(cols)
+            tbl.setRowCount(len(df))
+            for r, (_, row) in enumerate(df.iterrows()):
+                for c, val in enumerate(row):
+                    text = "" if pd.isna(val) else str(val)
+                    item = QTableWidgetItem(text)
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    tbl.setItem(r, c, item)
+            tbl.blockSignals(False)
+        self._cn_ref_dirty = False
+        # Re-apply search filter if active
+        if hasattr(self, 'leCnRefSearch'):
+            self._filter_cn_ref_table(self.leCnRefSearch.text())
+
     def _mapping_clear(self):
         reply = QMessageBox.question(
             self, "초기화 확인",
@@ -1160,6 +1340,52 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             self.tblMapping.setRowCount(0)
             from .core.land_use_mapper import save_mapping
             save_mapping({})
+
+    def _validate_mapping_cell(self, row, col):
+        """재분류명 유효성 → 셀 배경색 표시."""
+        if col != 1:
+            return
+        item = self.tblMapping.item(row, col)
+        if not item:
+            return
+        text = item.text().strip()
+        if not text:
+            item.setBackground(Qt.transparent)
+            item.setToolTip('')
+            return
+        cn_names = self._get_cn_land_use_names()
+        if text in cn_names:
+            from qgis.PyQt.QtGui import QColor
+            item.setBackground(QColor('#f0fdf4'))
+            item.setToolTip('')
+        else:
+            from qgis.PyQt.QtGui import QColor
+            item.setBackground(QColor('#fef2f2'))
+            item.setToolTip(f'CN값 테이블에 "{text}" 항목이 없습니다')
+
+    def _on_cn_ref_double_click(self, index):
+        """CN표 참조 패널 더블클릭 → 매핑 테이블 재분류명 자동 입력."""
+        # 0번 열(토지이용분류)의 텍스트 가져오기
+        item = self.tblCnRef.item(index.row(), 0)
+        if not item:
+            return
+        lu_name = item.text().strip()
+        if not lu_name:
+            return
+        # 매핑 테이블의 현재 선택 행
+        cur_row = self.tblMapping.currentRow()
+        if cur_row < 0:
+            return
+        # 재분류 이름 열(col 1)에 설정
+        target_item = self.tblMapping.item(cur_row, 1)
+        if target_item is None:
+            target_item = QTableWidgetItem('')
+            self.tblMapping.setItem(cur_row, 1, target_item)
+        target_item.setText(lu_name)
+        # 다음 행으로 자동 이동
+        next_row = cur_row + 1
+        if next_row < self.tblMapping.rowCount():
+            self.tblMapping.setCurrentCell(next_row, 1)
 
     def _enhance_recalc_tab(self):
         """CN값 계산 탭 상단에 'CN값 계산' 카드를 동적으로 추가."""
