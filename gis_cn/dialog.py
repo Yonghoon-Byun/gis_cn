@@ -527,9 +527,25 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self._cn_ref_dirty      = False
         self._cn_ref_popup      = None
         self._cn_ref_df         = pd.DataFrame()
+        self._deactivation_size = None
         self.setupUi(self)
         self._init_ui()
         self._connect_signals()
+
+    # ── 포커스 복귀 시 레이아웃 재계산에 의한 세로 확장 방지 ────────────────
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.ActivationChange:
+            if not self.isActiveWindow():
+                # 포커스를 잃을 때 현재 크기 저장
+                self._deactivation_size = self.size()
+            elif self._deactivation_size is not None:
+                # 포커스를 되찾을 때 저장된 크기로 복원
+                saved = self._deactivation_size
+                self._deactivation_size = None
+                from qgis.PyQt.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self.resize(saved))
+        super().changeEvent(event)
 
     # ── 초기화 ────────────────────────────────────────────────────────────────
 
@@ -1348,16 +1364,20 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
     def _show_cn_ref_popup(self):
         """CN값 참조 테이블 팝업을 표시."""
+        data_changed = False
         if not self._cn_ref_loaded:
             self._load_cn_ref_table()
+            data_changed = True
         elif self._cn_ref_dirty:
             self._sync_cn_ref_from_edit()
+            data_changed = True
 
         if not hasattr(self, '_cn_ref_popup') or self._cn_ref_popup is None:
             self._cn_ref_popup = _CnRefDialog(self)
             self._cn_ref_popup.value_selected.connect(self._on_cn_ref_value_selected)
+            data_changed = True
 
-        if hasattr(self, '_cn_ref_df') and not self._cn_ref_df.empty:
+        if data_changed and not self._cn_ref_df.empty:
             self._cn_ref_popup.load_data(self._cn_ref_df)
 
         self._cn_ref_popup.show()
