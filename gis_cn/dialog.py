@@ -16,7 +16,7 @@ from qgis.core import (
     QgsProject, QgsVectorLayer, QgsWkbTypes, QgsMapLayerType
 )
 
-from .core.db_manager import get_soil_layer, get_land_cover_layer, get_soil_lc_intersection
+from .core.db_manager import get_soil_layer, get_land_cover_layer, get_soil_lc_intersection, get_all_layers
 from .core.local_data_handler import (
     load_local_soil, load_local_land_cover,
     get_local_soil_lc_intersection, ValidationError
@@ -478,22 +478,17 @@ class CnWorker(QThread):
                     srid = 5186
                 polygon_wkt = union_geom.asWkt()
 
-                # ── ① DB: 토양군 Clip (ST_Intersection) ──────────────────────
-                self.progress.emit(8, "① PostGIS 토양군 추출 (Clip 포함)...")
-                soil_clipped = get_soil_layer(polygon_wkt, srid)
-                self.progress.emit(22, f"   → {soil_clipped.featureCount()}개 피처")
+                # ── ①②③ DB: 단일 연결로 토양군/토지피복도 clip + 교차분석 ────
+                self.progress.emit(8, "PostGIS 공간분석 시작 (단일 연결)...")
+                soil_clipped, lc_clipped, soil_lc = get_all_layers(polygon_wkt, srid, self.level)
+
+                self.progress.emit(22, f"① 토양군 clip: {soil_clipped.featureCount()}개")
                 self.layer_ready.emit(soil_clipped, "토양군_clip")
 
-                # ── ② DB: 토지피복도 Clip (ST_Intersection) ───────────────────
-                self.progress.emit(26, f"② PostGIS 토지피복도 추출 (Clip 포함, level={self.level})...")
-                lc_clipped = get_land_cover_layer(polygon_wkt, srid, self.level)
-                self.progress.emit(40, f"   → {lc_clipped.featureCount()}개 피처")
+                self.progress.emit(40, f"② 토지피복도 clip: {lc_clipped.featureCount()}개")
                 self.layer_ready.emit(lc_clipped, "토지피복도_clip")
 
-                # ── ③ DB: 토양군 × 토지피복도 Intersection (PostGIS) ──────────
-                self.progress.emit(44, "③ PostGIS Intersection(토양군 × 토지피복도) 중...")
-                soil_lc = get_soil_lc_intersection(polygon_wkt, srid, self.level)
-                self.progress.emit(68, f"   → {soil_lc.featureCount()} features")
+                self.progress.emit(68, f"③ 교차 분석: {soil_lc.featureCount()} features")
                 self.layer_ready.emit(soil_lc, "토양군_토지피복_교차")
 
                 # ── ④ QGIS Intersection × 소유역계 ───────────────────────────

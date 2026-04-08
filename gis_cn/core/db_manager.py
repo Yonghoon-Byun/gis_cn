@@ -35,7 +35,7 @@ def get_connection():
 def _rows_to_memory_layer(rows, col_names, col_oids, geom_col, layer_name, srid):
     """
     psycopg2 결과 행을 QgsVectorLayer (메모리) 로 변환.
-    geometry 컬럼은 ST_AsText()로 WKT 형태로 전달받아야 함.
+    geometry 컬럼은 ST_AsBinary()로 WKB(bytea) 형태로 전달받아야 함.
     """
     geom_idx = col_names.index(geom_col)
 
@@ -59,9 +59,9 @@ def _rows_to_memory_layer(rows, col_names, col_oids, geom_col, layer_name, srid)
     features = []
     for row in rows:
         feat = QgsFeature(layer.fields())
-        wkt = row[geom_idx]
-        if wkt:
-            feat.setGeometry(QgsGeometry.fromWkt(wkt))
+        wkb = row[geom_idx]
+        if wkb is not None:
+            feat.setGeometry(QgsGeometry.fromWkb(bytes(wkb)))
         attr_idx = 0
         for i, name in enumerate(col_names):
             if name == geom_col:
@@ -85,7 +85,7 @@ def get_soil_layer(polygon_geom_wkt: str, srid: int = 5186) -> QgsVectorLayer:
             SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom
         )
         SELECT soil_code, hydro_type, hydro_ty_1, k,
-               ST_AsText(clipped) AS geom
+               ST_AsBinary(clipped) AS geom
         FROM (
             SELECT soil_code, hydro_type, hydro_ty_1, k,
                    ST_CollectionExtract(
@@ -129,7 +129,7 @@ def get_land_cover_layer(
             SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom
         )
         SELECT gid, l1_code, l1_name, l2_code, l2_name, l3_code, l3_name,
-               ST_AsText(clipped) AS geom
+               ST_AsBinary(clipped) AS geom
         FROM (
             SELECT gid, l1_code, l1_name, l2_code, l2_name, l3_code, l3_name,
                    ST_CollectionExtract(
@@ -215,7 +215,7 @@ def get_soil_lc_intersection(
         )
         SELECT soil_code, hydro_type, hydro_ty_1, k,
                {code_col}, {name_col},
-               ST_AsText(geom) AS geom
+               ST_AsBinary(geom) AS geom
         FROM ix
         WHERE geom IS NOT NULL
           AND NOT ST_IsEmpty(geom)
@@ -236,4 +236,117 @@ def get_soil_lc_intersection(
         )
     except Exception as e:
         logger.error(f"토양군×토지피복 교차 오류: {e}")
+        raise
+
+
+def get_all_layers(
+    polygon_geom_wkt: str, srid: int = 5186, level: str = "l1"
+):
+    """
+    단일 DB 연결로 ①토양군_clip ②토지피복도_clip ③교차분석 레이어를 한 번에 반환.
+    PostgreSQL 임시 테이블을 활용해 clip 연산 중복을 제거한다.
+    반환: (soil_clipped, lc_clipped, soil_lc) QgsVectorLayer 튜플
+    """
+    code_col, name_col = _LC_DISSOLVE_COLS[level]
+
+    sql_soil = """
+        CREATE TEMP TABLE _soil_clip ON COMMIT DROP AS
+        SELECT soil_code, hydro_type, hydro_ty_1, k,
+               ST_CollectionExtract(
+                   ST_Intersection(ST_Transform(s.geom, %(srid)s), w.geom),
+                   3
+               ) AS geom
+        FROM public.soil s,
+             (SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom) w
+        WHERE ST_Intersects(s.geom, ST_Transform(w.geom, ST_SRID(s.geom)))
+    """
+
+    sql_lc = f"""
+        CREATE TEMP TABLE _lc_clip ON COMMIT DROP AS
+        SELECT gid, l1_code, l1_name, l2_code, l2_name, l3_code, l3_name,
+               ST_CollectionExtract(
+                   ST_Intersection(ST_Transform(l.geom, %(srid)s), w.geom),
+                   3
+               ) AS geom
+        FROM public.land_cover_yangju l,
+             (SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom) w
+        WHERE ST_Intersects(l.geom, ST_Transform(w.geom, ST_SRID(l.geom)))
+    """
+
+    sql_fetch_soil = """
+        SELECT soil_code, hydro_type, hydro_ty_1, k,
+               ST_AsBinary(geom) AS geom
+        FROM _soil_clip
+        WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom) AND ST_Area(geom) > 0
+    """
+
+    sql_fetch_lc = """
+        SELECT gid, l1_code, l1_name, l2_code, l2_name, l3_code, l3_name,
+               ST_AsBinary(geom) AS geom
+        FROM _lc_clip
+        WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom) AND ST_Area(geom) > 0
+    """
+
+    sql_intersect = f"""
+        WITH lc_dissolved AS (
+            SELECT {code_col}, {name_col},
+                   ST_Union(geom) AS geom
+            FROM _lc_clip
+            WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom) AND ST_Area(geom) > 0
+            GROUP BY {code_col}, {name_col}
+        ),
+        sc_valid AS (
+            SELECT soil_code, hydro_type, hydro_ty_1, k, geom
+            FROM _soil_clip
+            WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom) AND ST_Area(geom) > 0
+        ),
+        ix AS (
+            SELECT sc.soil_code, sc.hydro_type, sc.hydro_ty_1, sc.k,
+                   lc.{code_col}, lc.{name_col},
+                   ST_CollectionExtract(ST_Intersection(sc.geom, lc.geom), 3) AS geom
+            FROM sc_valid sc
+            JOIN lc_dissolved lc ON ST_Intersects(sc.geom, lc.geom)
+        )
+        SELECT soil_code, hydro_type, hydro_ty_1, k,
+               {code_col}, {name_col},
+               ST_AsBinary(geom) AS geom
+        FROM ix
+        WHERE geom IS NOT NULL AND NOT ST_IsEmpty(geom) AND ST_Area(geom) > 0
+    """
+
+    params = {"wkt": polygon_geom_wkt, "srid": srid}
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+
+        cur.execute(sql_soil, params)
+        cur.execute(sql_lc, params)
+
+        cur.execute(sql_fetch_soil)
+        soil_rows = cur.fetchall()
+        soil_col_names = [desc[0] for desc in cur.description]
+        soil_col_oids = [desc[1] for desc in cur.description]
+
+        cur.execute(sql_fetch_lc)
+        lc_rows = cur.fetchall()
+        lc_col_names = [desc[0] for desc in cur.description]
+        lc_col_oids = [desc[1] for desc in cur.description]
+
+        cur.execute(sql_intersect)
+        ix_rows = cur.fetchall()
+        ix_col_names = [desc[0] for desc in cur.description]
+        ix_col_oids = [desc[1] for desc in cur.description]
+
+        cur.close()
+        conn.close()
+
+        logger.info(f"[단일연결] 토양군 clip: {len(soil_rows)}개, 토지피복 clip: {len(lc_rows)}개, 교차: {len(ix_rows)}개 (level={level})")
+
+        soil_layer = _rows_to_memory_layer(soil_rows, soil_col_names, soil_col_oids, "geom", "토양군_clip", srid)
+        lc_layer = _rows_to_memory_layer(lc_rows, lc_col_names, lc_col_oids, "geom", "토지피복도_clip", srid)
+        ix_layer = _rows_to_memory_layer(ix_rows, ix_col_names, ix_col_oids, "geom", "토양군_토지피복_교차", srid)
+
+        return soil_layer, lc_layer, ix_layer
+    except Exception as e:
+        logger.error(f"get_all_layers 오류: {e}")
         raise
