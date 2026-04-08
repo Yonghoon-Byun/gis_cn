@@ -6,11 +6,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 DB_CONFIG = {
-    "host": "geo-spatial-hub.postgres.database.azure.com",
+    "host": "geo-spatial-hub-prod.postgres.database.azure.com",
     "port": 6432,
     "dbname": "dde-water",
     "user": "waterviewer",
-    "password": "dohwaviewer",
+    "password": "water123!@#",
 }
 
 GEOM_COLUMN = "geom"
