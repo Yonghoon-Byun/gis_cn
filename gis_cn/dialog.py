@@ -9,7 +9,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QTableWidget, QAbstractItemView, QFrame,
     QStyledItemDelegate, QRadioButton, QLineEdit,
-    QComboBox,
+    QComboBox, QProgressBar, QScrollArea, QSizePolicy,
 )
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal, QEvent
 from qgis.core import (
@@ -537,15 +537,14 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
     def changeEvent(self, event):
         if event.type() == QEvent.ActivationChange:
             if not self.isActiveWindow():
-                # 포커스를 잃을 때 현재 크기 저장
                 self._deactivation_size = self.size()
             elif self._deactivation_size is not None:
-                # 포커스를 되찾을 때 저장된 크기로 복원
                 saved = self._deactivation_size
                 self._deactivation_size = None
                 from qgis.PyQt.QtCore import QTimer
                 QTimer.singleShot(0, lambda: self.resize(saved))
         super().changeEvent(event)
+
 
     # ── 초기화 ────────────────────────────────────────────────────────────────
 
@@ -558,10 +557,24 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self._init_cn_table_widget()
         self._setup_mapping_tab()
         self._enhance_recalc_tab()
+        # 초기화 버튼 — Tab 0 버튼 행(hLayoutButtons)에 삽입
+        self.btnReset = QPushButton("초기화")
+        self.btnReset.setMinimumWidth(80)
+        self.btnReset.setMinimumHeight(36)
+        self.btnReset.setStyleSheet(
+            "QPushButton {"
+            "  border: 1px solid #dc2626; color: #dc2626; border-radius: 6px;"
+            "  padding: 6px 16px; font-weight: 600; background: white;"
+            "}"
+            "QPushButton:hover { background-color: #fef2f2; }"
+        )
+        self.hLayoutButtons.insertWidget(0, self.btnReset)
         # 동적 탭/카드 삽입 후 레이아웃이 다이얼로그 최소 크기를 강제하지 않도록 설정
         if self.layout():
             from qgis.PyQt.QtWidgets import QLayout
             self.layout().setSizeConstraint(QLayout.SetNoConstraint)
+        self.setMinimumSize(480, 400)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.resize(640, 700)
 
     def _refresh_layer_list(self):
@@ -597,6 +610,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.cmbLayer.currentIndexChanged.connect(self._on_layer_changed)
         self.btnRun.clicked.connect(self._run)
         self.btnClose.clicked.connect(self.close)
+        self.btnReset.clicked.connect(self._reset_all)
         # Tab 2
         self.btnAddRow.clicked.connect(self._cn_add_row)
         self.btnDeleteRow.clicked.connect(self._cn_delete_row)
@@ -896,6 +910,77 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         QMessageBox.critical(self, "오류 발생", msg)
         self.btnRun.setEnabled(True)
         self.progressBar.setValue(0)
+
+    # ── 초기화 ────────────────────────────────────────────────────────────────
+
+    def _reset_all(self):
+        """워크플로우 전체를 초기 상태로 되돌린다."""
+        reply = QMessageBox.question(
+            self, "초기화 확인",
+            "모든 작업 상태를 초기화하시겠습니까?\n"
+            "(캔버스의 분석 레이어도 제거됩니다)",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # 1) 워커 중단
+        if self.worker and self.worker.isRunning():
+            self.worker.terminate()
+            self.worker.wait()
+        self.worker = None
+
+        # 2) 캔버스에서 분석 레이어 제거
+        remove_names = {"토양군_clip", "토지피복도_clip", "토양군_토지피복_교차", "CN값_input"}
+        project = QgsProject.instance()
+        for lyr in list(project.mapLayers().values()):
+            if lyr.name() in remove_names:
+                project.removeMapLayer(lyr.id())
+
+        # 3) 상태 변수 리셋
+        self.input_layer = None
+        self._final_intersect_layer = None
+        self._last_level = 'l1'
+        self._last_name_field = ''
+        self._cn_table_loaded = False
+        self._mapping_tab_loaded = False
+        self._cn_ref_loaded = False
+        self._cn_ref_dirty = False
+        self._cn_ref_df = pd.DataFrame()
+        if self._cn_ref_popup is not None:
+            self._cn_ref_popup.close()
+            self._cn_ref_popup = None
+
+        # 4) Tab 0 UI 리셋
+        self.progressBar.setValue(0)
+        self.txtLog.clear()
+        self.leFilePath.clear()
+        self.cmbNameField.clear()
+        self.rbFile.setChecked(True)
+        self.rbL1.setChecked(True)
+        self.rbSourceDB.setChecked(True)
+        self._toggle_input_mode()
+        self.btnRun.setEnabled(True)
+        self._refresh_layer_list()
+
+        # 5) Tab 1 매핑 테이블 리셋
+        self.tblMapping.setRowCount(0)
+
+        # 6) Tab 2 CN값 테이블 리셋
+        self.tblCnValues.setRowCount(0)
+        self.tblCnValues.setColumnCount(0)
+
+        # 7) Tab 3 리셋
+        self.progressBarCalc.setValue(0)
+        self.progressBarCalc.setVisible(False)
+        self.txtRecalcLog.clear()
+        self.leOutputDir.clear()
+        self._refresh_recalc_layer_list()
+        self.tblWsGroups.setRowCount(0)
+
+        # 8) Tab 0으로 이동
+        self.tabWidget.setCurrentIndex(TAB_CALC)
+        self._log("초기화 완료. 처음부터 다시 시작할 수 있습니다.")
 
     # ── CN값 편집 탭 ──────────────────────────────────────────────────────────
 
@@ -1473,6 +1558,25 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         lbl.setStyleSheet("color: #6b7280; font-size: 12px; border: none;")
         card_layout.addWidget(lbl)
 
+        # 프로그레스 바
+        self.progressBarCalc = QProgressBar()
+        self.progressBarCalc.setValue(0)
+        self.progressBarCalc.setTextVisible(True)
+        self.progressBarCalc.setFormat("%p%  %v/%m")
+        self.progressBarCalc.setFixedHeight(20)
+        self.progressBarCalc.setStyleSheet(
+            "QProgressBar {"
+            "  border: 1px solid #e5e7eb; border-radius: 4px;"
+            "  background-color: #f3f4f6; text-align: center;"
+            "  font-size: 11px; color: #374151;"
+            "}"
+            "QProgressBar::chunk {"
+            "  background-color: #1f2937; border-radius: 3px;"
+            "}"
+        )
+        self.progressBarCalc.setVisible(False)
+        card_layout.addWidget(self.progressBarCalc)
+
         # 버튼 행
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -1493,6 +1597,41 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         outer_layout.insertWidget(0, card)
 
         self._setup_watershed_group_card(outer_layout)
+
+        # Tab 3 전체를 QScrollArea로 감싸기 (창 축소 시 찌그러짐 방지)
+        self._wrap_tab_in_scroll(recalc_tab)
+
+    def _wrap_tab_in_scroll(self, tab_widget):
+        """탭 내부 위젯들을 QScrollArea로 감싸서 창 축소 시 스크롤 가능하게 한다."""
+        layout = tab_widget.layout()
+        margins = layout.contentsMargins()
+        spacing = layout.spacing()
+
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setSpacing(spacing)
+        container_layout.setContentsMargins(margins)
+
+        # 기존 아이템을 컨테이너로 이동 (spacer 제거)
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                container_layout.addWidget(item.widget())
+            elif item.layout():
+                container_layout.addLayout(item.layout())
+            # spacerItem은 건너뜀 (불필요한 여백 제거)
+
+        # 원래 레이아웃을 스크롤 전용으로 변경
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidget(container)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        layout.addWidget(scroll)
 
     def _setup_watershed_group_card(self, recalc_layout):
         """Tab 3에 유역합성 설정 카드를 동적으로 추가."""
@@ -1544,6 +1683,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.tblWsGroups.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tblWsGroups.verticalHeader().setDefaultSectionSize(32)
         self.tblWsGroups.verticalHeader().setVisible(False)
+        self.tblWsGroups.setMinimumHeight(120)
+        self.tblWsGroups.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         card_layout.addWidget(self.tblWsGroups)
 
         # 버튼 행
@@ -1741,8 +1882,15 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             return
 
         self._recalc_log("▶ CN값 계산 중...")
+        self.progressBarCalc.setVisible(True)
+        self.progressBarCalc.setMaximum(5)
+        self.progressBarCalc.setValue(0)
+        self.btnApplyCn.setEnabled(False)
+        from qgis.PyQt.QtWidgets import QApplication
         try:
             # ⑤ CN값_input 레이어 구성
+            self.progressBarCalc.setValue(1)
+            QApplication.processEvents()
             self._recalc_log("⑤ CN값_input 레이어 구성 중...")
             _, name_col = LEVEL_COLUMNS[self._last_level]
             cn_input_layer = _build_result_layer(
@@ -1751,6 +1899,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             self._recalc_log(f"   → {cn_input_layer.featureCount()} features 생성")
 
             # ⑥ 토지이용 재분류 매핑 적용
+            self.progressBarCalc.setValue(2)
+            QApplication.processEvents()
             from .core.land_use_mapper import load_mapping, apply_mapping_to_layer
             mapping = load_mapping()
             if mapping:
@@ -1760,6 +1910,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
                 self._recalc_log("⑥ (저장된 재분류 매핑 없음)")
 
             # ⑦ CN값 매칭 (편집 탭에 로드된 테이블 우선, 없으면 기본 파일)
+            self.progressBarCalc.setValue(3)
+            QApplication.processEvents()
             self._recalc_log("⑦ CN값 매칭 중...")
             if not self._cn_table_loaded:
                 self._load_cn_to_table()
@@ -1776,17 +1928,24 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             else:
                 self._recalc_log("   ✔ 모든 피처 CN값 매칭 완료")
 
+            # 레이어 추가
+            self.progressBarCalc.setValue(4)
+            QApplication.processEvents()
             cn_input_layer.setName("CN값_input")
             QgsProject.instance().addMapLayer(cn_input_layer)
             self._recalc_log("   ✦ 레이어 추가됨: [CN값_input]")
             self._refresh_recalc_layer_list()
 
+            self.progressBarCalc.setValue(5)
             self._recalc_log("━" * 44)
             self._recalc_log("✔ CN값 계산 완료!")
         except Exception as e:
             logger.exception("CN값 계산 오류")
             self._recalc_log(f"[오류] {e}")
             QMessageBox.critical(self, "오류", str(e))
+            self.progressBarCalc.setValue(0)
+        finally:
+            self.btnApplyCn.setEnabled(True)
 
     def _load_xlsx_as_layer(self, path: str, name: str, sheet: str = "Sheet1"):
         """xlsx 파일의 특정 시트를 QGIS 테이블 레이어로 프로젝트에 추가."""

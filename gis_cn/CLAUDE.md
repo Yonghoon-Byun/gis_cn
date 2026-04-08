@@ -169,6 +169,18 @@ Tab 0 `rbSourceDB`/`rbSourceLocal` 라디오로 데이터 소스 전환. `CnWork
 - `pandas` + `openpyxl`: cn_value.xlsx 읽기/쓰기
 - QGIS Processing framework: `native:dissolve`, `native:intersection` (clip은 PostGIS로 대체됨)
 
+## 배포 규칙
+
+**플러그인 소스 수정 후 반드시 `dist/gis_cn.zip` 재생성할 것.** 배포 zip이 항상 최신 소스를 반영해야 한다.
+
+```
+프로젝트 구조:
+  gis_cn/       → 플러그인 소스 (순수 배포 대상)
+  docs/         → 매뉴얼, 기획안, 참고자료
+  scripts/      → DB 마이그레이션 등 유틸리티
+  dist/         → 배포용 zip (gis_cn.zip)
+```
+
 ## 주의사항
 
 - Processing 알고리즘은 반드시 QGIS 환경 내에서 실행해야 하며, 독립 Python 스크립트로 실행 불가
