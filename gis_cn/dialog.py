@@ -1361,6 +1361,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         self.tabWidget.insertTab(1, tab, "토지이용 재분류")
         self.tabWidget.setTabText(3, "CN값 계산")
+        self.tabWidget.tabBar().setUsesScrollButtons(True)
 
     def _mapping_load_saved(self):
         """저장된 land_use_mapping.json을 테이블에 로드."""
@@ -1609,9 +1610,10 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         btn_row.addWidget(self.btnApplyCn)
         card_layout.addLayout(btn_row)
 
-        outer_layout.insertWidget(0, card)
-
+        # 유역합성 카드를 먼저 삽입 (토글 접힘 상태)
         self._setup_watershed_group_card(outer_layout)
+        # CN값 계산 카드를 유역합성 아래에 삽입
+        outer_layout.insertWidget(1, card)
 
         # Tab 3 전체를 QScrollArea로 감싸기 (창 축소 시 찌그러짐 방지)
         self._wrap_tab_in_scroll(recalc_tab)
@@ -1649,7 +1651,9 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         layout.addWidget(scroll)
 
     def _setup_watershed_group_card(self, recalc_layout):
-        """Tab 3에 유역합성 설정 카드를 동적으로 추가."""
+        """Tab 3에 유역합성 설정 카드를 동적으로 추가 (체크박스 토글, 기본 접힘)."""
+        from qgis.PyQt.QtWidgets import QCheckBox
+
         card = QFrame()
         card.setObjectName("watershedGroupCard")
         card.setStyleSheet(
@@ -1661,13 +1665,14 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         card_layout.setSpacing(10)
         card_layout.setContentsMargins(16, 14, 16, 14)
 
-        # 카드 헤더
+        # 카드 헤더 — 체크박스로 토글
         header_row = QHBoxLayout()
-        card_title = QLabel("유역합성 설정")
-        card_title.setStyleSheet(
-            "font-size: 14px; font-weight: bold; color: #374151; border: none;"
+        self.chkWsGroup = QCheckBox("유역합성 사용")
+        self.chkWsGroup.setStyleSheet(
+            "QCheckBox { font-size: 14px; font-weight: bold; color: #374151; border: none; }"
         )
-        header_row.addWidget(card_title)
+        self.chkWsGroup.setChecked(False)
+        header_row.addWidget(self.chkWsGroup)
         header_row.addStretch()
 
         self.btnWsGroupAddRow = QPushButton("+ 행 추가")
@@ -1676,6 +1681,12 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         header_row.addWidget(self.btnWsGroupDeleteRow)
         card_layout.addLayout(header_row)
 
+        # 접힘 가능한 컨텐츠 컨테이너
+        self._wsGroupContent = QWidget()
+        content_layout = QVBoxLayout(self._wsGroupContent)
+        content_layout.setSpacing(10)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+
         # 설명
         desc = QLabel(
             "소유역을 그룹화하여 합성 CN값을 계산합니다. "
@@ -1683,7 +1694,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #6b7280; font-size: 12px; border: none;")
-        card_layout.addWidget(desc)
+        content_layout.addWidget(desc)
 
         # 테이블 (그룹명 + 소유역1~20)
         self._ws_max_members = 20
@@ -1700,7 +1711,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.tblWsGroups.verticalHeader().setVisible(False)
         self.tblWsGroups.setMinimumHeight(120)
         self.tblWsGroups.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        card_layout.addWidget(self.tblWsGroups)
+        content_layout.addWidget(self.tblWsGroups)
 
         # 버튼 행
         btn_row = QHBoxLayout()
@@ -1716,16 +1727,32 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         )
         btn_row.addWidget(self.btnWsGroupLoad)
         btn_row.addWidget(self.btnWsGroupSave)
-        card_layout.addLayout(btn_row)
+        content_layout.addLayout(btn_row)
 
-        # Insert after CN calculation card (position 1)
-        recalc_layout.insertWidget(1, card)
+        card_layout.addWidget(self._wsGroupContent)
+
+        # 기본 접힘 상태
+        self._wsGroupContent.setVisible(False)
+        self.btnWsGroupAddRow.setVisible(False)
+        self.btnWsGroupDeleteRow.setVisible(False)
+
+        # 체크박스 토글 연결
+        self.chkWsGroup.toggled.connect(self._toggle_ws_group)
+
+        # CN값 계산 카드보다 먼저 삽입 (position 0)
+        recalc_layout.insertWidget(0, card)
 
         # Connect signals
         self.btnWsGroupAddRow.clicked.connect(self._ws_group_add_row)
         self.btnWsGroupDeleteRow.clicked.connect(self._ws_group_delete_row)
         self.btnWsGroupSave.clicked.connect(self._ws_group_save)
         self.btnWsGroupLoad.clicked.connect(self._ws_group_load)
+
+    def _toggle_ws_group(self, checked):
+        """유역합성 체크박스 토글 — 컨텐츠 표시/숨김."""
+        self._wsGroupContent.setVisible(checked)
+        self.btnWsGroupAddRow.setVisible(checked)
+        self.btnWsGroupDeleteRow.setVisible(checked)
 
     def _get_watershed_names(self) -> list:
         """소유역명 고유값 목록을 반환. 입력 레이어 → CN값_input 폴백."""
