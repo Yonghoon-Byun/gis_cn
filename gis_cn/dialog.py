@@ -359,11 +359,22 @@ class _CnRefDialog(QDialog):
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        # 검색
+        # 검색 + 새로고침
+        search_row = QHBoxLayout()
         self.leSearch = QLineEdit()
         self.leSearch.setPlaceholderText("토지이용분류 검색...")
         self.leSearch.textChanged.connect(self._filter)
-        layout.addWidget(self.leSearch)
+        search_row.addWidget(self.leSearch)
+
+        self.btnRefresh = QPushButton("새로고침")
+        self.btnRefresh.setStyleSheet(
+            "QPushButton { border: 1px solid #d1d5db; color: #374151;"
+            "  border-radius: 4px; padding: 6px 12px; background: white; }"
+            "QPushButton:hover { background-color: #f3f4f6; }"
+        )
+        self.btnRefresh.setToolTip("CN값 편집 탭의 변경사항을 반영합니다")
+        search_row.addWidget(self.btnRefresh)
+        layout.addLayout(search_row)
 
         # 테이블
         self.tblRef = QTableWidget()
@@ -1476,6 +1487,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         if not hasattr(self, '_cn_ref_popup') or self._cn_ref_popup is None:
             self._cn_ref_popup = _CnRefDialog(self)
             self._cn_ref_popup.value_selected.connect(self._on_cn_ref_value_selected)
+            self._cn_ref_popup.btnRefresh.clicked.connect(self._refresh_cn_ref_popup)
             data_changed = True
 
         if data_changed and not self._cn_ref_df.empty:
@@ -1491,6 +1503,12 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         if df is not None and not df.empty:
             self._cn_ref_df = df
         self._cn_ref_dirty = False
+
+    def _refresh_cn_ref_popup(self):
+        """CN참조 팝업의 새로고침 버튼 — Tab 2 편집 내용을 즉시 반영."""
+        self._sync_cn_ref_from_edit()
+        if self._cn_ref_popup and not self._cn_ref_df.empty:
+            self._cn_ref_popup.load_data(self._cn_ref_df)
 
     def _mapping_clear(self):
         reply = QMessageBox.question(
