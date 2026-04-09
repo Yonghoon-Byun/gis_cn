@@ -61,7 +61,9 @@ def _rows_to_memory_layer(rows, col_names, col_oids, geom_col, layer_name, srid)
         feat = QgsFeature(layer.fields())
         wkb = row[geom_idx]
         if wkb is not None:
-            feat.setGeometry(QgsGeometry.fromWkb(bytes(wkb)))
+            geom = QgsGeometry()
+            geom.fromWkb(bytes(wkb))
+            feat.setGeometry(geom)
         attr_idx = 0
         for i, name in enumerate(col_names):
             if name == geom_col:

@@ -340,7 +340,7 @@ class _CnRefDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("CN값 참조 테이블")
         self.setWindowFlags(self.windowFlags() | Qt.Window)
-        self.resize(700, 550)
+        self.resize(360, 550)
         self.setStyleSheet(
             "QDialog { background-color: #f9fafb; }"
             "QTableWidget { background-color: white; border: 1px solid #e5e7eb; border-radius: 4px; }"
@@ -570,7 +570,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             self.layout().setSizeConstraint(QLayout.SetNoConstraint)
         self.setMinimumSize(480, 400)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        self.resize(640, 700)
+        self.resize(640, 760)
 
     def _refresh_layer_list(self):
         self.cmbLayer.clear()
@@ -814,7 +814,6 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             layer = QgsVectorLayer(path, "소유역계", "ogr")
             if not layer.isValid():
                 raise ValueError(f"레이어 로드 실패: {path}")
-            return layer
         else:
             layer_id = self.cmbLayer.currentData()
             if not layer_id:
@@ -822,7 +821,23 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             layer = QgsProject.instance().mapLayer(layer_id)
             if not layer:
                 raise ValueError("선택한 레이어를 찾을 수 없습니다.")
-            return layer
+
+        # 좌표계가 EPSG:5186이 아니면 자동 변환
+        from qgis.core import QgsCoordinateReferenceSystem
+        target_crs = QgsCoordinateReferenceSystem("EPSG:5186")
+        if layer.crs() != target_crs:
+            src_epsg = layer.crs().authid() or "알 수 없음"
+            self._log(f"  좌표계 변환: {src_epsg} → EPSG:5186")
+            import processing
+            result = processing.run("native:reprojectlayer", {
+                'INPUT': layer,
+                'TARGET_CRS': target_crs,
+                'OUTPUT': 'memory:소유역계_5186'
+            })
+            layer = result['OUTPUT']
+            self._log(f"  변환 완료: {layer.featureCount()}개 피처")
+
+        return layer
 
     def _run(self):
         if not self.cmbNameField.currentText():
@@ -1092,6 +1107,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             self._df_to_table(df)
             self._cn_table_loaded = True
             QMessageBox.information(self, "불러오기 완료", f"불러오기 완료:\n{path}")
+            self._cn_ref_dirty = True
         except Exception as e:
             QMessageBox.critical(self, "불러오기 오류", str(e))
 
@@ -1106,6 +1122,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             tbl.setItem(row, c, item)
         tbl.scrollToBottom()
         tbl.setCurrentCell(row, 0)
+        self._cn_ref_dirty = True
 
     def _cn_delete_row(self):
         tbl = self.tblCnValues
@@ -1122,6 +1139,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         )
         if reply == QMessageBox.Yes:
             tbl.removeRow(row)
+            self._cn_ref_dirty = True
 
     def _cn_add_column(self):
         col_name, ok = QInputDialog.getText(
@@ -1144,6 +1162,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             item = QTableWidgetItem("")
             item.setTextAlignment(Qt.AlignCenter)
             tbl.setItem(r, col, item)
+        self._cn_ref_dirty = True
 
     def _cn_reload(self):
         reply = QMessageBox.question(
@@ -1154,6 +1173,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         if reply == QMessageBox.Yes:
             self._cn_table_loaded = False
             self._load_cn_to_table()
+            self._cn_ref_dirty = True
 
     # ── 재계산 탭 ─────────────────────────────────────────────────────────────
 
