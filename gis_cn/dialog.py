@@ -909,9 +909,10 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self._log(msg)
 
     def _on_layer_ready(self, layer, name: str):
-        """단계별 중간 레이어를 QGIS 캔버스에 즉시 추가."""
+        """단계별 중간 레이어를 QGIS 캔버스 최상단에 순서대로 추가."""
         layer.setName(name)
-        QgsProject.instance().addMapLayer(layer)
+        QgsProject.instance().addMapLayer(layer, False)
+        QgsProject.instance().layerTreeRoot().insertLayer(0, layer)
         self._log(f"   ✦ 레이어 추가됨: [{name}]")
 
     def _on_finished(self, final_intersect_layer, _fail_list):
@@ -1992,7 +1993,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             self.progressBarCalc.setValue(4)
             QApplication.processEvents()
             cn_input_layer.setName("CN값_input")
-            QgsProject.instance().addMapLayer(cn_input_layer)
+            QgsProject.instance().addMapLayer(cn_input_layer, False)
+            QgsProject.instance().layerTreeRoot().insertLayer(0, cn_input_layer)
             self._recalc_log("   ✦ 레이어 추가됨: [CN값_input]")
             self._refresh_recalc_layer_list()
 
