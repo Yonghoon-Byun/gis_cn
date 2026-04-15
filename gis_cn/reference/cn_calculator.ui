@@ -37,17 +37,17 @@
        </widget>
       </item>
       <item>
-       <spacer>
-        <property name="orientation"><enum>Qt::Horizontal</enum></property>
-       </spacer>
-      </item>
-      <item>
        <widget class="QLabel" name="lblSubtitle">
         <property name="text"><string>유역 CN값 산정 도구</string></property>
         <property name="styleSheet">
-         <string>font-size: 11px; color: #9ca3af; border: none;</string>
+         <string>font-size: 11px; color: #9ca3af; border: none; margin-left: 10px; padding-top: 6px;</string>
         </property>
        </widget>
+      </item>
+      <item>
+       <spacer>
+        <property name="orientation"><enum>Qt::Horizontal</enum></property>
+       </spacer>
       </item>
      </layout>
     </widget>
@@ -289,12 +289,6 @@
           <widget class="QPushButton" name="btnDeleteRow">
            <property name="text"><string>- 행 삭제</string></property>
            <property name="toolTip"><string>선택한 행을 삭제합니다</string></property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QPushButton" name="btnAddColumn">
-           <property name="text"><string>+ 열 추가</string></property>
-           <property name="toolTip"><string>새 토양군 열을 추가합니다</string></property>
           </widget>
          </item>
          <item>

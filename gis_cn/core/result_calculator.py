@@ -497,24 +497,24 @@ def export_results(result1_data: list, result2_data: list, path: str,
     ws1.column_dimensions['L'].width = 9.375
     ws1.column_dimensions['N'].width = 11.625
 
-    # ── Sheet: result2 ────────────────────────────────────────────────────────
-    ws2 = wb.create_sheet('result2')
+    # ── result2 블록 (result1 시트의 O열부터 작성) ───────────────────────────
+    R2_COL = 15  # 'O'
 
-    _sc(ws2.cell(1, 1), ' 유역별 CN정리', fn, al, bltb, fill=fsilver, num_fmt=nm)
-    _sc(ws2.cell(1, 2), None,             fn, al, btb,  num_fmt=nm)
-    _sc(ws2.cell(1, 3), None,             fn, al, btb,  num_fmt=nm)
-    _sc(ws2.cell(1, 4), None,             fn, al, brtb, num_fmt=nm)
-    ws2.merge_cells('A1:D1')
+    _sc(ws1.cell(1, R2_COL),   ' 유역별 CN정리', fn, al, bltb, fill=fsilver, num_fmt=nm)
+    _sc(ws1.cell(1, R2_COL+1), None,             fn, al, btb,  num_fmt=nm)
+    _sc(ws1.cell(1, R2_COL+2), None,             fn, al, btb,  num_fmt=nm)
+    _sc(ws1.cell(1, R2_COL+3), None,             fn, al, brtb, num_fmt=nm)
+    ws1.merge_cells(start_row=1, start_column=R2_COL, end_row=1, end_column=R2_COL+3)
 
     for i, h in enumerate(['유역', '총면적', 'AMC2 CN', 'AMC3 CN']):
-        _sc(ws2.cell(2, i+1), h, fn, al, ball, fill=fcyan, num_fmt=nm)
+        _sc(ws1.cell(2, R2_COL+i), h, fn, al, ball, fill=fcyan, num_fmt=nm)
 
     for ri, row in enumerate(result2_data):
         r2 = ri + 3
-        _sc(ws2.cell(r2, 1), row['watershed'],  fn, al, ball, num_fmt=nm)
-        _sc(ws2.cell(r2, 2), row['total_area'], fn, al, ball, num_fmt=nm)
-        _sc(ws2.cell(r2, 3), row['amc2_cn'],    fn, al, ball, num_fmt=nm)
-        _sc(ws2.cell(r2, 4), row['amc3_cn'],    fn, al, ball, num_fmt=nm)
+        _sc(ws1.cell(r2, R2_COL),   row['watershed'],  fn, al, ball, num_fmt=nm)
+        _sc(ws1.cell(r2, R2_COL+1), row['total_area'], fn, al, ball, num_fmt=nm)
+        _sc(ws1.cell(r2, R2_COL+2), row['amc2_cn'],    fn, al, ball, num_fmt=nm)
+        _sc(ws1.cell(r2, R2_COL+3), row['amc3_cn'],    fn, al, ball, num_fmt=nm)
 
     # ── 유역합성 (result2) ───────────────────────────────────────────────────
     if grouped_result2:
@@ -523,20 +523,20 @@ def export_results(result1_data: list, result2_data: list, path: str,
 
         r2_next = len(result2_data) + 3
         # 빈 행
-        for c in range(1, 5):
-            _sc(ws2.cell(r2_next, c), None, fn, al, ball, num_fmt=nm)
+        for c in range(R2_COL, R2_COL+4):
+            _sc(ws1.cell(r2_next, c), None, fn, al, ball, num_fmt=nm)
         r2_next += 1
         # 구분 헤더
-        _sc(ws2.cell(r2_next, 1), '【유역합성】', fn, al, ball, fill=fsilver, num_fmt=nm)
-        for c in range(2, 5):
-            _sc(ws2.cell(r2_next, c), None, fn, al, ball, fill=fsilver, num_fmt=nm)
+        _sc(ws1.cell(r2_next, R2_COL), '【유역합성】', fn, al, ball, fill=fsilver, num_fmt=nm)
+        for c in range(R2_COL+1, R2_COL+4):
+            _sc(ws1.cell(r2_next, c), None, fn, al, ball, fill=fsilver, num_fmt=nm)
         r2_next += 1
 
         for row in grouped_result2:
-            _sc(ws2.cell(r2_next, 1), row['watershed'], fn, al, ball, fill=fill_green, num_fmt=nm)
-            _sc(ws2.cell(r2_next, 2), row['total_area'], fn, al, ball, num_fmt=nm)
-            _sc(ws2.cell(r2_next, 3), row['amc2_cn'], fn, al, ball, num_fmt=nm)
-            _sc(ws2.cell(r2_next, 4), row['amc3_cn'], fn, al, ball, num_fmt=nm)
+            _sc(ws1.cell(r2_next, R2_COL),   row['watershed'],  fn, al, ball, fill=fill_green, num_fmt=nm)
+            _sc(ws1.cell(r2_next, R2_COL+1), row['total_area'], fn, al, ball, num_fmt=nm)
+            _sc(ws1.cell(r2_next, R2_COL+2), row['amc2_cn'],    fn, al, ball, num_fmt=nm)
+            _sc(ws1.cell(r2_next, R2_COL+3), row['amc3_cn'],    fn, al, ball, num_fmt=nm)
             r2_next += 1
 
     wb.save(path)

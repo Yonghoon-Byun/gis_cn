@@ -36,8 +36,8 @@ FORM_CLASS, _ = uic.loadUiType(
 )
 
 TAB_CALC    = 0   # 레이어 불러오기
-TAB_MAPPING = 1   # 토지이용 재분류
-TAB_CN_EDIT = 2   # CN값 편집
+TAB_CN_EDIT = 1   # CN값 편집 (.ui 원본 위치 유지)
+TAB_MAPPING = 2   # 토지이용 재분류 (insertTab(2,...)로 삽입)
 TAB_RECALC  = 3   # CN값 계산
 
 # ── 카드 기반 다이얼로그 스타일 (reference/region_selector_dialog.py 기준) ──
@@ -284,7 +284,7 @@ class _MappingComboDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent, option, index):
         combo = QComboBox(parent)
-        combo.setEditable(True)
+        combo.setEditable(False)
         # 매 호출 시 최신 CN표 목록 로드
         dialog = self.parent()
         while dialog and not isinstance(dialog, CnCalculatorDialog):
@@ -296,15 +296,15 @@ class _MappingComboDelegate(QStyledItemDelegate):
         combo.setStyleSheet(
             "QComboBox { border: 1px solid #d1d5db; border-radius: 3px; padding: 1px 4px; }"
         )
+        # 편집 진입 시 자동으로 드롭다운 펼치기
+        from qgis.PyQt.QtCore import QTimer
+        QTimer.singleShot(0, combo.showPopup)
         return combo
 
     def setEditorData(self, editor, index):
         val = index.data(Qt.EditRole) or ''
         idx = editor.findText(str(val))
-        if idx >= 0:
-            editor.setCurrentIndex(idx)
-        else:
-            editor.setCurrentText(str(val))
+        editor.setCurrentIndex(idx if idx >= 0 else 0)
 
     def setModelData(self, editor, model, index):
         model.setData(index, editor.currentText(), Qt.EditRole)
@@ -325,6 +325,27 @@ class _MappingComboDelegate(QStyledItemDelegate):
                     table.setCurrentIndex(table.model().index(next_row, cur.column()))
             return True
         return super().eventFilter(obj, event)
+
+    def paint(self, painter, option, index):
+        # 우측 화살표를 위해 텍스트 영역을 좁혀서 기본 렌더
+        from qgis.PyQt.QtWidgets import QStyle, QStyleOptionViewItem, QApplication
+        from qgis.PyQt.QtCore import QRect
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.rect = QRect(option.rect)
+        opt.rect.setRight(option.rect.right() - 16)  # 텍스트 영역 축소
+        super().paint(painter, opt, index)
+
+        # 우측에 네이티브 스타일의 드롭다운 화살표
+        arrow_opt = QStyleOptionViewItem(option)
+        arrow_opt.rect = QRect(
+            option.rect.right() - 14,
+            option.rect.top(),
+            14,
+            option.rect.height(),
+        )
+        style = QApplication.style()
+        style.drawPrimitive(QStyle.PE_IndicatorArrowDown, arrow_opt, painter)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -579,9 +600,9 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         if self.layout():
             from qgis.PyQt.QtWidgets import QLayout
             self.layout().setSizeConstraint(QLayout.SetNoConstraint)
-        self.setMinimumSize(480, 400)
+        self.setMinimumSize(480, 600)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        self.resize(640, 760)
+        self.resize(640, 1000)
 
     def _refresh_layer_list(self):
         self.cmbLayer.clear()
@@ -620,7 +641,6 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         # Tab 2
         self.btnAddRow.clicked.connect(self._cn_add_row)
         self.btnDeleteRow.clicked.connect(self._cn_delete_row)
-        self.btnAddColumn.clicked.connect(self._cn_add_column)
         self.btnReloadCn.clicked.connect(self._cn_reload)
         self.btnImportCn.clicked.connect(self._cn_import)
         self.btnSaveCn.clicked.connect(self._cn_export)
@@ -631,8 +651,6 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.btnExportResult2.setVisible(False)
         # Tab 2: 토지이용 재분류
         self.btnMappingLoadLayer.clicked.connect(self._mapping_load_from_layer)
-        self.btnMappingAddRow.clicked.connect(self._mapping_add_row)
-        self.btnMappingDeleteRow.clicked.connect(self._mapping_delete_row)
         self.btnMappingSave.clicked.connect(self._mapping_save)
         self.btnMappingClear.clicked.connect(self._mapping_clear)
         # Tab 1: CN표 참조 팝업
@@ -642,9 +660,10 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         # Tab 2: CN표 편집 시 참조 팝업 dirty 플래그
         self.tblCnValues.cellChanged.connect(lambda: setattr(self, '_cn_ref_dirty', True))
         # 다음 단계 버튼
-        self.btnNextStep0.clicked.connect(lambda: self.tabWidget.setCurrentIndex(TAB_MAPPING))
-        self.btnNextStep1.clicked.connect(lambda: self.tabWidget.setCurrentIndex(TAB_CN_EDIT))
-        self.btnNextStep2.clicked.connect(lambda: self.tabWidget.setCurrentIndex(TAB_RECALC))
+        # 탭 순서: 레이어(0) → CN값 편집(1) → 토지이용 재분류(2) → CN값 계산(3)
+        self.btnNextStep0.clicked.connect(lambda: self.tabWidget.setCurrentIndex(TAB_CN_EDIT))
+        self.btnNextStep2.clicked.connect(lambda: self.tabWidget.setCurrentIndex(TAB_MAPPING))
+        self.btnNextStep1.clicked.connect(lambda: self.tabWidget.setCurrentIndex(TAB_RECALC))
         # 탭 전환
         self.tabWidget.currentChanged.connect(self._on_tab_changed)
 
@@ -670,19 +689,45 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
     def _on_file_path_changed(self):
         path = self.leFilePath.text().strip()
-        if path and os.path.exists(path):
-            name = os.path.splitext(os.path.basename(path))[0]
-            layer = QgsVectorLayer(path, name, "ogr")
-            if layer.isValid():
-                self._populate_name_fields(layer)
-                # 캔버스에 레이어 추가 (중복 방지)
-                existing = [
-                    lyr for lyr in QgsProject.instance().mapLayers().values()
-                    if lyr.source() == layer.source()
-                ]
-                if not existing:
-                    QgsProject.instance().addMapLayer(layer)
-                    self.iface.zoomToActiveLayer()
+        if not (path and os.path.exists(path)):
+            return
+        name = os.path.splitext(os.path.basename(path))[0]
+        layer = QgsVectorLayer(path, name, "ogr")
+        if not layer.isValid():
+            return
+
+        from qgis.core import QgsCoordinateReferenceSystem
+        target_crs = QgsCoordinateReferenceSystem("EPSG:5186")
+        if layer.crs() != target_crs:
+            src_epsg = layer.crs().authid() or "알 수 없음"
+            try:
+                import processing
+                result = processing.run("native:reprojectlayer", {
+                    'INPUT': layer,
+                    'TARGET_CRS': target_crs,
+                    'OUTPUT': f'memory:{name}_5186'
+                })
+                layer = result['OUTPUT']
+                layer.setName(f"{name}_5186")
+                self._log(f"소유역 좌표계 변환: {src_epsg} → EPSG:5186 ({layer.featureCount()}개 피처)")
+            except Exception as e:
+                self._log(f"좌표계 변환 실패: {e} (원본 로드)")
+
+        self._populate_name_fields(layer)
+
+        # 캔버스 중복 방지: 동일 이름 메모리 레이어 제거 후 추가
+        for lyr in list(QgsProject.instance().mapLayers().values()):
+            if lyr.name() == layer.name() or (
+                hasattr(lyr, 'source') and lyr.source() == layer.source()
+            ):
+                QgsProject.instance().removeMapLayer(lyr.id())
+        QgsProject.instance().addMapLayer(layer)
+        self._loaded_subbasin_layer = layer
+        try:
+            self.iface.setActiveLayer(layer)
+            self.iface.zoomToActiveLayer()
+        except Exception:
+            pass
 
     def _on_layer_changed(self):
         if self.rbLayer.isChecked():
@@ -1152,29 +1197,6 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             tbl.removeRow(row)
             self._cn_ref_dirty = True
 
-    def _cn_add_column(self):
-        col_name, ok = QInputDialog.getText(
-            self, "열 추가", "새 열 이름을 입력하세요\n(예: E, 기타 등):"
-        )
-        if not ok or not col_name.strip():
-            return
-        col_name = col_name.strip()
-        tbl = self.tblCnValues
-        for c in range(tbl.columnCount()):
-            h = tbl.horizontalHeaderItem(c)
-            if h and h.text() == col_name:
-                QMessageBox.warning(self, "중복 열", f"'{col_name}' 열이 이미 존재합니다.")
-                return
-        col = tbl.columnCount()
-        tbl.insertColumn(col)
-        tbl.setHorizontalHeaderItem(col, QTableWidgetItem(col_name))
-        tbl.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
-        for r in range(tbl.rowCount()):
-            item = QTableWidgetItem("")
-            item.setTextAlignment(Qt.AlignCenter)
-            tbl.setItem(r, col, item)
-        self._cn_ref_dirty = True
-
     def _cn_reload(self):
         reply = QMessageBox.question(
             self, "기본값 불러오기",
@@ -1246,7 +1268,6 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
                            grouped_result1=grouped_r1, grouped_result2=grouped_r2)
             self._recalc_log(f"✔ 저장 완료: {path}")
             self._load_xlsx_as_layer(path, "result1", sheet="result1")
-            self._load_xlsx_as_layer(path, "result2", sheet="result2")
             QMessageBox.information(self, "저장 완료", f"results.xlsx 저장:\n{path}")
         except Exception as e:
             logger.exception("결과 내보내기 오류")
@@ -1283,8 +1304,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         info_lbl = QLabel(
             "토지피복도 원본 이름 → 재분류 이름으로 매핑합니다. "
-            "재분류 이름은 드롭다운에서 선택하거나 직접 입력할 수 있습니다. "
-            "오른쪽 CN값 참조 테이블에서 항목을 더블클릭하면 자동 입력됩니다."
+            "재분류 이름은 CN값 편집 탭의 토지이용분류 목록에서만 선택할 수 있습니다. "
+            "오른쪽 CN표 참조 버튼으로 CN값을 확인할 수 있습니다."
         )
         info_lbl.setWordWrap(True)
         info_lbl.setStyleSheet("color: #854d0e; font-size: 12px; border: none;")
@@ -1314,10 +1335,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         header_row.addStretch()
 
         self.btnMappingLoadLayer = QPushButton("레이어에서 불러오기")
-        self.btnMappingAddRow    = QPushButton("+ 행 추가")
-        self.btnMappingDeleteRow = QPushButton("- 행 삭제")
-        for btn in (self.btnMappingLoadLayer, self.btnMappingAddRow, self.btnMappingDeleteRow):
-            header_row.addWidget(btn)
+        header_row.addWidget(self.btnMappingLoadLayer)
         self.btnCnRefPopup = QPushButton("CN표 참조")
         self.btnCnRefPopup.setStyleSheet(
             "QPushButton { border: 1px solid #d1d5db; color: #374151;"
@@ -1370,20 +1388,23 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         next_row.addWidget(self.btnNextStep1)
         outer.addLayout(next_row)
 
-        self.tabWidget.insertTab(1, tab, "토지이용 재분류")
-        self.tabWidget.setTabText(3, "CN값 계산")
+        self.tabWidget.insertTab(TAB_MAPPING, tab, "토지이용 재분류")
+        self.tabWidget.setTabText(TAB_RECALC, "CN값 계산")
         self.tabWidget.tabBar().setUsesScrollButtons(True)
 
     def _mapping_load_saved(self):
-        """저장된 land_use_mapping.json을 테이블에 로드."""
+        """저장된 land_use_mapping.json을 테이블에 로드.
+        CN표에 없는 재분류 값은 빈 값으로 표시(자유입력 금지 정책)."""
         from .core.land_use_mapper import load_mapping
         mapping = load_mapping()
+        valid_names = set(self._get_cn_land_use_names())
         self.tblMapping.setRowCount(0)
         for original, remapped in mapping.items():
             r = self.tblMapping.rowCount()
             self.tblMapping.insertRow(r)
             self.tblMapping.setItem(r, 0, QTableWidgetItem(original))
-            self.tblMapping.setItem(r, 1, QTableWidgetItem(remapped))
+            shown = remapped if remapped in valid_names else ''
+            self.tblMapping.setItem(r, 1, QTableWidgetItem(shown))
         self._mapping_tab_loaded = True
 
     def _mapping_load_from_layer(self):
@@ -1437,20 +1458,6 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             if orig and remap:
                 mapping[orig] = remap
         return mapping
-
-    def _mapping_add_row(self):
-        r = self.tblMapping.rowCount()
-        self.tblMapping.insertRow(r)
-        self.tblMapping.setItem(r, 0, QTableWidgetItem(''))
-        self.tblMapping.setItem(r, 1, QTableWidgetItem(''))
-        self.tblMapping.setCurrentCell(r, 0)
-
-    def _mapping_delete_row(self):
-        r = self.tblMapping.currentRow()
-        if r < 0:
-            QMessageBox.information(self, "행 삭제", "삭제할 행을 먼저 선택하세요.")
-            return
-        self.tblMapping.removeRow(r)
 
     def _mapping_save(self):
         from .core.land_use_mapper import save_mapping
@@ -1727,8 +1734,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.tblWsGroups.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tblWsGroups.verticalHeader().setDefaultSectionSize(32)
         self.tblWsGroups.verticalHeader().setVisible(False)
-        self.tblWsGroups.setMinimumHeight(120)
-        self.tblWsGroups.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.tblWsGroups.setFixedHeight(140)
+        self.tblWsGroups.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         content_layout.addWidget(self.tblWsGroups)
 
         # 버튼 행
@@ -1749,10 +1756,16 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         card_layout.addWidget(self._wsGroupContent)
 
-        # 기본 접힘 상태
+        # 컨텐츠 높이만 고정 (카드는 sizeHint로 자동 축소/확장 → 토글 시 260 이내)
+        self._wsGroupContent.setFixedHeight(210)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        # 기본 접힘 상태 — 헤더만 표시
         self._wsGroupContent.setVisible(False)
         self.btnWsGroupAddRow.setVisible(False)
         self.btnWsGroupDeleteRow.setVisible(False)
+
+        self._wsGroupCard = card
 
         # 체크박스 토글 연결
         self.chkWsGroup.toggled.connect(self._toggle_ws_group)
@@ -1767,10 +1780,12 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.btnWsGroupLoad.clicked.connect(self._ws_group_load)
 
     def _toggle_ws_group(self, checked):
-        """유역합성 체크박스 토글 — 컨텐츠 표시/숨김."""
+        """유역합성 체크박스 토글 — 컨텐츠 표시/숨김. 카드는 sizeHint로 자동 조절."""
         self._wsGroupContent.setVisible(checked)
         self.btnWsGroupAddRow.setVisible(checked)
         self.btnWsGroupDeleteRow.setVisible(checked)
+        self._wsGroupCard.adjustSize()
+        self._wsGroupCard.updateGeometry()
 
     def _get_watershed_names(self) -> list:
         """소유역명 고유값 목록을 반환. 입력 레이어 → CN값_input 폴백."""
