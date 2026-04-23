@@ -10,6 +10,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel, QTableWidget, QAbstractItemView, QFrame,
     QStyledItemDelegate, QRadioButton, QLineEdit,
     QComboBox, QProgressBar, QScrollArea, QSizePolicy,
+    QCheckBox,
 )
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal, QEvent
 from qgis.core import (
@@ -26,8 +27,15 @@ from .core.spatial_ops import (
     _build_result_layer, LEVEL_COLUMNS
 )
 from .core.cn_matcher import load_cn_table, apply_cn_to_layer, XLSX_PATH
-from .core.result_calculator import calculate_results, calculate_grouped_results, export_results
+from .core.result_calculator import (
+    calculate_results, calculate_grouped_results, export_results,
+    build_analysis_result,
+)
+from .core.analysis_result import ProjectMeta
 from .core.watershed_group import load_groups, save_groups
+
+PLUGIN_DIR = os.path.dirname(__file__)
+DEFAULT_HWP_TEMPLATE = os.path.join(PLUGIN_DIR, 'templates', 'v1.0', 'cn_report.hwpx')
 
 logger = logging.getLogger(__name__)
 
@@ -584,6 +592,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self._init_cn_table_widget()
         self._setup_mapping_tab()
         self._enhance_recalc_tab()
+        self._setup_output_format_row()
         # 초기화 버튼 — Tab 0 버튼 행(hLayoutButtons)에 삽입
         self.btnReset = QPushButton("초기화")
         self.btnReset.setMinimumWidth(80)
@@ -1244,13 +1253,17 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             QMessageBox.warning(self, "입력 오류", str(e))
             return
 
-        path = os.path.join(folder, "results.xlsx")
-        self._recalc_log("▶ results.xlsx 계산 중...")
+        want_excel = getattr(self, 'chkExportExcel', None) is None or self.chkExportExcel.isChecked()
+        want_hwp = getattr(self, 'chkExportHwp', None) is not None and self.chkExportHwp.isChecked()
+        if not (want_excel or want_hwp):
+            QMessageBox.warning(self, "입력 오류", "Excel 또는 한글 중 하나 이상 선택해야 합니다.")
+            return
+
+        self._recalc_log("▶ 결과 내보내기 시작...")
         try:
             result1_data, result2_data, null_cn_rows = calculate_results(layer)
             self._warn_null_cn(null_cn_rows)
 
-            # 유역합성 결과
             groups = self._get_watershed_groups()
             grouped_r1, grouped_r2 = None, None
             if groups:
@@ -1263,16 +1276,96 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
                     self._recalc_log(f"  [경고] 유역합성 계산 실패: {e}")
                     self._recalc_log(f"  → 개별 소유역 결과만 내보냅니다.")
                     grouped_r1, grouped_r2 = None, None
-
-            export_results(result1_data, result2_data, path,
-                           grouped_result1=grouped_r1, grouped_result2=grouped_r2)
-            self._recalc_log(f"✔ 저장 완료: {path}")
-            self._load_xlsx_as_layer(path, "result1", sheet="result1")
-            QMessageBox.information(self, "저장 완료", f"results.xlsx 저장:\n{path}")
         except Exception as e:
-            logger.exception("결과 내보내기 오류")
+            logger.exception("결과 계산 오류")
             self._recalc_log(f"[오류] {e}")
             QMessageBox.critical(self, "오류", str(e))
+            return
+
+        summary_lines: list[str] = []
+        excel_path: str = ""
+
+        # Excel 출력
+        if want_excel:
+            excel_path = os.path.join(folder, "results.xlsx")
+            try:
+                self._recalc_log(f"  Excel 저장 중... ({excel_path})")
+                export_results(result1_data, result2_data, excel_path,
+                               grouped_result1=grouped_r1, grouped_result2=grouped_r2)
+                self._recalc_log(f"  ✔ Excel 저장 완료")
+                summary_lines.append(f"Excel: {excel_path}")
+                self._load_xlsx_as_layer(excel_path, "result1", sheet="result1")
+            except Exception as e:
+                logger.exception("Excel 내보내기 오류")
+                self._recalc_log(f"  [오류] Excel 저장 실패: {e}")
+                summary_lines.append(f"Excel: 실패 — {e}")
+
+        # HWP 출력 (부분 실패 허용) — HWPX(zip+xml) 포맷으로 저장
+        if want_hwp:
+            hwp_path = os.path.join(folder, "results.hwpx")
+            template = self.leHwpTemplate.text().strip() or DEFAULT_HWP_TEMPLATE
+            try:
+                from .core.hwp_renderer import render_hwp, HwpRendererError
+                cn_ref = self._collect_cn_reference_rows()
+                meta = ProjectMeta(
+                    project_name=os.path.basename(folder),
+                    land_cover_level=self._get_selected_level_key(),
+                    data_source=self._get_selected_data_source(),
+                )
+                result = build_analysis_result(
+                    result1_data, result2_data,
+                    meta=meta,
+                    cn_reference=cn_ref,
+                    grouped_result1=grouped_r1, grouped_result2=grouped_r2,
+                    null_cn_rows=null_cn_rows,
+                )
+                self._recalc_log(f"  HWP 저장 중... ({hwp_path})")
+                render_hwp(result, template, hwp_path)
+                self._recalc_log(f"  ✔ HWP 저장 완료")
+                summary_lines.append(f"HWP: {hwp_path}")
+            except Exception as e:
+                logger.exception("HWP 내보내기 오류")
+                self._recalc_log(f"  [경고] HWP 저장 실패: {e}")
+                summary_lines.append(f"HWP: 실패 — {e}")
+
+        msg = "\n".join(summary_lines) or "출력된 파일이 없습니다."
+        QMessageBox.information(self, "저장 결과", msg)
+
+    def _collect_cn_reference_rows(self) -> list:
+        """Tab 2 CN값 편집표 → [(land_use, a, b, c, d), ...] (HWP 기준표용)."""
+        rows: list[tuple] = []
+        if not hasattr(self, 'tblCnValues'):
+            return rows
+        t = self.tblCnValues
+        for r in range(t.rowCount()):
+            lu_item = t.item(r, 0)
+            if lu_item is None or not lu_item.text().strip():
+                continue
+            def _int_or_none(c):
+                it = t.item(r, c)
+                if it is None or not it.text().strip():
+                    return None
+                try:
+                    return int(float(it.text().strip()))
+                except ValueError:
+                    return None
+            rows.append((
+                lu_item.text().strip(),
+                _int_or_none(1), _int_or_none(2), _int_or_none(3), _int_or_none(4),
+            ))
+        return rows
+
+    def _get_selected_level_key(self) -> str:
+        for key, rb_name in (('l1', 'rbL1'), ('l2', 'rbL2'), ('l3', 'rbL3')):
+            rb = getattr(self, rb_name, None)
+            if rb is not None and rb.isChecked():
+                return key
+        return 'l3'
+
+    def _get_selected_data_source(self) -> str:
+        if getattr(self, 'rbSourceLocal', None) is not None and self.rbSourceLocal.isChecked():
+            return 'local'
+        return 'db'
 
     # ── 토지이용 재분류 탭 ────────────────────────────────────────────────────
 
@@ -1564,6 +1657,97 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         next_row = cur_row + 1
         if next_row < self.tblMapping.rowCount():
             self.tblMapping.setCurrentCell(next_row, 1)
+
+    def _setup_output_format_row(self):
+        """출력 포맷 선택 행을 'btnExportResult1' 상단에 삽입.
+
+        체크박스: ☑ Excel(.xlsx) / ☐ 한글(.hwp)
+        HWP 체크 시 템플릿 경로(leHwpTemplate) + 찾아보기 버튼 활성화.
+        """
+        # btnExportResult1 의 부모 레이아웃을 찾아 그 위에 새 행 삽입
+        parent_layout = self.btnExportResult1.parentWidget().layout() \
+            if self.btnExportResult1.parentWidget() else None
+        if parent_layout is None:
+            logger.warning("출력 포맷 행 삽입 실패: btnExportResult1 부모 레이아웃 없음")
+            return
+
+        format_row = QHBoxLayout()
+        format_row.setSpacing(8)
+
+        lbl = QLabel("출력 포맷")
+        lbl.setStyleSheet("color: #6b7280; font-size: 13px; border: none;")
+        lbl.setMinimumWidth(110)
+        format_row.addWidget(lbl)
+
+        self.chkExportExcel = QCheckBox("Excel (.xlsx)")
+        self.chkExportExcel.setChecked(True)
+        self.chkExportHwp = QCheckBox("한글 (.hwp)")
+        self.chkExportHwp.setChecked(False)
+        format_row.addWidget(self.chkExportExcel)
+        format_row.addWidget(self.chkExportHwp)
+        format_row.addStretch()
+
+        # HWP 템플릿 경로 행
+        tmpl_row = QHBoxLayout()
+        tmpl_row.setSpacing(8)
+        lbl_t = QLabel("HWP 템플릿")
+        lbl_t.setStyleSheet("color: #6b7280; font-size: 13px; border: none;")
+        lbl_t.setMinimumWidth(110)
+        tmpl_row.addWidget(lbl_t)
+
+        self.leHwpTemplate = QLineEdit()
+        self.leHwpTemplate.setText(DEFAULT_HWP_TEMPLATE)
+        self.leHwpTemplate.setPlaceholderText("templates/v1.0/cn_report.hwp")
+        tmpl_row.addWidget(self.leHwpTemplate)
+
+        self.btnHwpTemplate = QPushButton("찾아보기")
+        self.btnHwpTemplate.setMaximumWidth(80)
+        self.btnHwpTemplate.clicked.connect(self._browse_hwp_template)
+        tmpl_row.addWidget(self.btnHwpTemplate)
+
+        # 초기 상태: HWP 체크 해제 → 템플릿 행 비활성
+        self.leHwpTemplate.setEnabled(False)
+        self.btnHwpTemplate.setEnabled(False)
+        self.chkExportHwp.toggled.connect(self._on_hwp_toggled)
+
+        # 삽입: btnExportResult1 의 인덱스 찾아 그 앞에 두 행 추가
+        btn_index = -1
+        for i in range(parent_layout.count()):
+            item = parent_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            # btnExportResult1가 직접 위젯이 아닐 수 있음(수평 레이아웃 내부) — 직접 비교
+            if w is self.btnExportResult1:
+                btn_index = i
+                break
+            # 수평 레이아웃 내부 검사
+            child_layout = item.layout() if item is not None else None
+            if child_layout is not None:
+                for j in range(child_layout.count()):
+                    if child_layout.itemAt(j).widget() is self.btnExportResult1:
+                        btn_index = i
+                        break
+            if btn_index >= 0:
+                break
+
+        if btn_index < 0:
+            # 못 찾으면 끝에 붙임
+            parent_layout.addLayout(format_row)
+            parent_layout.addLayout(tmpl_row)
+        else:
+            parent_layout.insertLayout(btn_index, format_row)
+            parent_layout.insertLayout(btn_index + 1, tmpl_row)
+
+    def _on_hwp_toggled(self, checked: bool):
+        self.leHwpTemplate.setEnabled(checked)
+        self.btnHwpTemplate.setEnabled(checked)
+
+    def _browse_hwp_template(self):
+        start = self.leHwpTemplate.text().strip() or DEFAULT_HWP_TEMPLATE
+        path, _ = QFileDialog.getOpenFileName(
+            self, "HWP 템플릿 선택", start, "한글 파일 (*.hwpx *.hwp)"
+        )
+        if path:
+            self.leHwpTemplate.setText(path)
 
     def _enhance_recalc_tab(self):
         """CN값 계산 탭 상단에 'CN값 계산' 카드를 동적으로 추가."""

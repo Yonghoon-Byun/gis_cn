@@ -3,6 +3,11 @@ import logging
 import pandas as pd
 from qgis.core import QgsVectorLayer
 
+from .analysis_result import (
+    AnalysisResult, ProjectMeta, WatershedBlock, WatershedSummary,
+    LandUseRow, CnReferenceRow, NullRow, MapImage,
+)
+
 logger = logging.getLogger(__name__)
 
 # 논/답은 AMC3 = 79 고정
@@ -541,3 +546,161 @@ def export_results(result1_data: list, result2_data: list, path: str,
 
     wb.save(path)
     logger.info(f"results.xlsx 저장: {path}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AnalysisResult 변환 및 통합 래퍼 (HWP 렌더러와 공유하는 단일 입력 모델)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _dict_to_block(d: dict, *, is_composite: bool = False) -> WatershedBlock:
+    rows = [
+        LandUseRow(
+            land_use=r['land_use'],
+            a_area=r.get('A_area'), a_cn=r.get('A_cn'),
+            b_area=r.get('B_area'), b_cn=r.get('B_cn'),
+            c_area=r.get('C_area'), c_cn=r.get('C_cn'),
+            d_area=r.get('D_area'), d_cn=r.get('D_cn'),
+            total_area=r.get('total_area'),
+            amc2_cn=r.get('amc2_cn'),
+            amc3_cn=r.get('amc3_cn'),
+        )
+        for r in d.get('rows', [])
+    ]
+    return WatershedBlock(
+        name=d['watershed'],
+        is_composite=is_composite,
+        rows=rows,
+        total_a=d.get('total_A', 0.0) or 0.0,
+        total_b=d.get('total_B', 0.0) or 0.0,
+        total_c=d.get('total_C', 0.0) or 0.0,
+        total_d=d.get('total_D', 0.0) or 0.0,
+        total_area=d.get('total_area', 0.0) or 0.0,
+        amc2_cn=d.get('amc2_cn', 0.0) or 0.0,
+        amc3_cn=d.get('amc3_cn', 0.0) or 0.0,
+    )
+
+
+def _dict_to_summary(d: dict, *, is_composite: bool = False) -> WatershedSummary:
+    return WatershedSummary(
+        name=d['watershed'],
+        total_area=d.get('total_area', 0.0) or 0.0,
+        amc2_cn=d.get('amc2_cn', 0.0) or 0.0,
+        amc3_cn=d.get('amc3_cn', 0.0) or 0.0,
+        is_composite=is_composite,
+    )
+
+
+def build_analysis_result(result1_data: list,
+                          result2_data: list,
+                          *,
+                          meta: ProjectMeta = None,
+                          cn_reference: list = None,
+                          grouped_result1: list = None,
+                          grouped_result2: list = None,
+                          null_cn_rows: list = None,
+                          map_images: list = None,
+                          notes: str = "") -> AnalysisResult:
+    """list[dict] 기반 기존 계산 결과를 `AnalysisResult`로 변환."""
+    ref_rows: list[CnReferenceRow] = []
+    for row in (cn_reference or []):
+        if isinstance(row, CnReferenceRow):
+            ref_rows.append(row)
+        elif isinstance(row, dict):
+            ref_rows.append(CnReferenceRow(
+                land_use=row.get('토지이용분류') or row.get('land_use') or '',
+                a=row.get('A'), b=row.get('B'), c=row.get('C'), d=row.get('D'),
+            ))
+        else:
+            # tuple/list: (land_use, a, b, c, d)
+            lu, a, b, c, d = (list(row) + [None]*5)[:5]
+            ref_rows.append(CnReferenceRow(land_use=lu, a=a, b=b, c=c, d=d))
+
+    null_list: list[NullRow] = []
+    for r in (null_cn_rows or []):
+        if isinstance(r, NullRow):
+            null_list.append(r)
+        elif isinstance(r, (list, tuple)) and len(r) >= 3:
+            null_list.append(NullRow(watershed=r[0], land_use=r[1], hydro_type=r[2]))
+
+    return AnalysisResult(
+        meta=meta or ProjectMeta(),
+        cn_reference=ref_rows,
+        detail_blocks=[_dict_to_block(d) for d in (result1_data or [])],
+        summary_rows=[_dict_to_summary(d) for d in (result2_data or [])],
+        composite_detail=[_dict_to_block(d, is_composite=True) for d in (grouped_result1 or [])],
+        composite_summary=[_dict_to_summary(d, is_composite=True) for d in (grouped_result2 or [])],
+        map_images=list(map_images or []),
+        null_cn_rows=null_list,
+        notes=notes,
+    )
+
+
+def export_excel(result: AnalysisResult, path: str) -> None:
+    """`AnalysisResult` 기반 Excel 저장 (내부적으로 기존 `export_results` 사용).
+
+    HWP 렌더러와 동일한 입력 시그니처를 제공하기 위한 래퍼.
+    """
+    r1 = [
+        {
+            'watershed': b.name,
+            'rows': [
+                {
+                    'land_use': r.land_use,
+                    'A_area': r.a_area, 'A_cn': r.a_cn,
+                    'B_area': r.b_area, 'B_cn': r.b_cn,
+                    'C_area': r.c_area, 'C_cn': r.c_cn,
+                    'D_area': r.d_area, 'D_cn': r.d_cn,
+                    'total_area': r.total_area,
+                    'amc2_cn': r.amc2_cn, 'amc3_cn': r.amc3_cn,
+                }
+                for r in b.rows
+            ],
+            'total_A': b.total_a, 'total_B': b.total_b,
+            'total_C': b.total_c, 'total_D': b.total_d,
+            'total_area': b.total_area,
+            'amc2_cn': b.amc2_cn, 'amc3_cn': b.amc3_cn,
+        }
+        for b in result.detail_blocks
+    ]
+    r2 = [
+        {
+            'watershed': s.name,
+            'total_area': s.total_area,
+            'amc2_cn': s.amc2_cn,
+            'amc3_cn': s.amc3_cn,
+        }
+        for s in result.summary_rows
+    ]
+    gr1 = [  # composite
+        {
+            'watershed': b.name,
+            'rows': [
+                {
+                    'land_use': r.land_use,
+                    'A_area': r.a_area, 'A_cn': r.a_cn,
+                    'B_area': r.b_area, 'B_cn': r.b_cn,
+                    'C_area': r.c_area, 'C_cn': r.c_cn,
+                    'D_area': r.d_area, 'D_cn': r.d_cn,
+                    'total_area': r.total_area,
+                    'amc2_cn': r.amc2_cn, 'amc3_cn': r.amc3_cn,
+                }
+                for r in b.rows
+            ],
+            'total_A': b.total_a, 'total_B': b.total_b,
+            'total_C': b.total_c, 'total_D': b.total_d,
+            'total_area': b.total_area,
+            'amc2_cn': b.amc2_cn, 'amc3_cn': b.amc3_cn,
+        }
+        for b in result.composite_detail
+    ] or None
+    gr2 = [
+        {
+            'watershed': s.name,
+            'total_area': s.total_area,
+            'amc2_cn': s.amc2_cn,
+            'amc3_cn': s.amc3_cn,
+        }
+        for s in result.composite_summary
+    ] or None
+
+    export_results(r1, r2, path, grouped_result1=gr1, grouped_result2=gr2)

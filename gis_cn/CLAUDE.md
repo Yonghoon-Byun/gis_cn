@@ -201,7 +201,28 @@ Tab 0 `rbSourceDB`/`rbSourceLocal` 라디오로 데이터 소스 전환. `CnWork
 
 - 토지피복도 커스텀 분류 (L1/L2/L3 혼합 분류 — A안 확정, 미구현)
 - 삽도(지도 이미지) 자동 생성
-- 한글(.hwp) 내보내기
+- 한글(.hwp) 템플릿 실제 파일(`templates/v1.0/cn_report.hwp`) — 스펙 문서만 제공됨
+
+## HWP/Excel 공통 입력 모델
+
+`core/analysis_result.py`의 `AnalysisResult` dataclass가 **Single Source of Truth**. Excel/HWP 양쪽 렌더러는 이 모델만 입력으로 받는다.
+
+- `core/analysis_result.py` — dataclass 정의 (`AnalysisResult`, `WatershedBlock`, `LandUseRow`, `WatershedSummary`, `CnReferenceRow`, `ProjectMeta`, `MapImage`, `NullRow`)
+- `core/result_calculator.py::build_analysis_result()` — 기존 `calculate_results()` 반환(list[dict])을 `AnalysisResult`로 변환
+- `core/result_calculator.py::export_excel(result, path)` — 기존 `export_results()`의 얇은 래퍼 (HWP 렌더러와 동일 시그니처)
+- `core/hwp_renderer.py::render_hwp(result, template, out)` — pyhwpx(OLE) 래퍼. 한글 미설치/미등록 시 `HwpRendererError`
+- `templates/v1.0/README.md` — HWP 템플릿 제작 스펙(누름틀/책갈피/셀필드 ID)
+
+UI는 결과 저장 버튼 위에 "출력 포맷" 체크박스 + HWP 템플릿 경로를 추가(`_setup_output_format_row()`). Excel/HWP 동시 선택 시 순차 실행하며, HWP 실패해도 Excel은 보존(부분 실패 허용).
+
+## 최근 주요 변경 (2026-04-22)
+
+- 버전 0.1 → 0.2 (Excel/HWP 공통 출력 모델 도입)
+- `core/analysis_result.py` 신규 — `AnalysisResult` dataclass (SSOT)
+- `core/hwp_renderer.py` 신규 — pyhwpx 기반 HWP 렌더러 스켈레톤 (지연 import)
+- `core/result_calculator.py` — `build_analysis_result()`, `export_excel()` 추가 (기존 API 보존)
+- `dialog.py` — 출력 포맷 선택 UI(Excel/HWP 체크박스 + 템플릿 경로) 추가
+- `templates/v1.0/README.md` — HWP 템플릿 제작 스펙 추가
 
 ## 최근 주요 변경 (2026-04-08~09)
 
