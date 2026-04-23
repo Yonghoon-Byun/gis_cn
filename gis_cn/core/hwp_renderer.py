@@ -26,6 +26,31 @@ from .analysis_result import (
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 페이지 분할 설정
+# ─────────────────────────────────────────────────────────────────────────────
+
+# A4 기준 한 쪽에 수용 가능한 데이터 행 수(2행 복합 헤더 + 본문). 경험값.
+# 값이 너무 크면 넘침, 너무 작으면 페이지 과분할. 템플릿 폰트/여백 조정 시 재튜닝.
+# 렌더링 결과에서 블록이 여전히 넘칠 경우 이 값을 낮추세요.
+ROWS_PER_PAGE = 22
+
+# 템플릿(cn_report.hwpx)의 표별 미리 할당된 데이터 행 수.
+# gen_template.py의 data_rows 인자와 1:1 동기화. 템플릿 재생성 시 이 값도 맞춰야 함.
+# 렌더 후 사용하지 않은 여분 행은 `_trim_table_rows`가 삭제하여 빈 페이지 방지.
+TEMPLATE_DATA_ROWS = {
+    "cn_reference":          20,  # ref.*
+    "cn_result":             50,  # res.*
+    "cn_summary":            20,  # sum.*
+    "cn_composite":          30,  # cres.*
+    "cn_composite_summary":  10,  # csum.*
+}
+
+# 헤더 반복은 gen_template.py의 `_set_table_layout_props`가 표 생성 시 TableHeaderCell 속성을
+# 2행 복합 헤더에 지정하여 한글의 네이티브 "제목 줄 반복" 기능에 위임한다. 렌더러는 블록
+# 경계에서 BreakPage만 삽입하면 충분하며, 분할 표에 헤더를 수동으로 복제할 필요 없음.
+
+
 class HwpRendererError(RuntimeError):
     """HWP 렌더링 실패 (한글 미설치/COM 미등록/템플릿 오류 포함)."""
 
@@ -127,11 +152,30 @@ def render_hwp(result: AnalysisResult, template: Path, out: Path,
         hwp.open(str(template))
 
         _render_meta(hwp, result)
+
         _render_cn_reference(hwp, result.cn_reference)
-        _render_detail(hwp, RES_PREFIX,  result.detail_blocks)
+        _trim_table_rows(hwp, _ns(REF_PREFIX, "lu"),
+                         len(result.cn_reference), TEMPLATE_DATA_ROWS["cn_reference"])
+
+        _render_detail(hwp, RES_PREFIX, result.detail_blocks)
+        _trim_table_rows(hwp, _ns(RES_PREFIX, "ws"),
+                         _count_detail_rows(result.detail_blocks),
+                         TEMPLATE_DATA_ROWS["cn_result"])
+
         _render_summary(hwp, SUM_PREFIX, result.summary_rows)
+        _trim_table_rows(hwp, _ns(SUM_PREFIX, "ws"),
+                         len(result.summary_rows), TEMPLATE_DATA_ROWS["cn_summary"])
+
         _render_detail(hwp, CRES_PREFIX, result.composite_detail)
+        _trim_table_rows(hwp, _ns(CRES_PREFIX, "ws"),
+                         _count_detail_rows(result.composite_detail),
+                         TEMPLATE_DATA_ROWS["cn_composite"])
+
         _render_summary(hwp, CSUM_PREFIX, result.composite_summary)
+        _trim_table_rows(hwp, _ns(CSUM_PREFIX, "ws"),
+                         len(result.composite_summary),
+                         TEMPLATE_DATA_ROWS["cn_composite_summary"])
+
         _render_map_images(hwp, result.map_images)
         _render_notes(hwp, result)
 
@@ -163,6 +207,37 @@ def _put_field_safe(hwp, name: str, value: str, idx: int = 0) -> None:
         hwp.put_field_text(name, value, idx)
     except Exception as e:
         logger.debug(f"필드 {name}[{idx}] 치환 건너뜀: {e}")
+
+
+def _count_detail_rows(blocks: list[WatershedBlock]) -> int:
+    """detail 블록들의 총 데이터 행 수(토지이용 행 + 블록별 합계 행)."""
+    return sum(len(b.rows) + 1 for b in blocks)
+
+
+def _trim_table_rows(hwp, field_name: str, first_unused_idx: int,
+                     template_total: int) -> None:
+    """템플릿의 데이터 행 중 채우지 않은 여분을 삭제.
+
+    `field_name` 필드의 idx=first_unused_idx 부터 template_total-1 까지 각 행을 제거.
+    삭제는 idx 높은 순으로(뒤→앞) 수행하여 인덱스 재정렬 문제를 회피.
+    `text=False`로 누름틀 코드에 위치시켜 셀 삭제가 누름틀 텍스트 스코프가 아닌
+    셀 자체에 적용되도록 함. 실패 시 조용히 패스.
+    """
+    if template_total <= 0 or first_unused_idx >= template_total:
+        return
+    ok, fail = 0, 0
+    for idx in range(template_total - 1, first_unused_idx - 1, -1):
+        try:
+            try:
+                hwp.move_to_field(field_name, idx=idx, text=False, start=True)
+            except TypeError:
+                hwp.move_to_field(field_name)
+            hwp.HAction.Run("TableDeleteRow")
+            ok += 1
+        except Exception as e:
+            fail += 1
+            logger.debug(f"행 삭제 실패 {field_name}[{idx}]: {e}")
+    logger.info(f"trim {field_name}: {ok} deleted, {fail} failed (range {first_unused_idx}..{template_total-1})")
 
 
 def _fmt_area(v: Optional[float]) -> str:
@@ -199,20 +274,80 @@ def _render_cn_reference(hwp, rows: list[CnReferenceRow]) -> None:
         _put_field_safe(hwp, _ns(REF_PREFIX, "cn_d"), _fmt_cn(row.d), i)
 
 
+def _plan_page_breaks(blocks: list[WatershedBlock],
+                      rows_per_page: int = ROWS_PER_PAGE) -> list[int]:
+    """블록 누적 행수가 rows_per_page 초과 시 해당 블록 시작 직전에 넣을 페이지 브레이크 인덱스 리스트.
+
+    블록 하나는 두 페이지로 나누지 않음(내부 분할은 한글에 위임).
+    블록 행수 = `len(block.rows) + 1` (+1은 합계 행).
+    """
+    breaks: list[int] = []
+    if not blocks or rows_per_page <= 0:
+        return breaks
+    acc = 0
+    for i, block in enumerate(blocks):
+        block_rows = len(block.rows) + 1
+        if i > 0 and acc + block_rows > rows_per_page:
+            breaks.append(i)
+            acc = block_rows
+        else:
+            acc += block_rows
+    return breaks
+
+
 def _render_detail(hwp, prefix: str, blocks: list[WatershedBlock]) -> None:
     """p.26~ 소유역별 상세 — 블록 반복 + 각 블록 내 행 복제.
+
+    ROWS_PER_PAGE를 기준으로 블록 경계에서 페이지 강제 분할. 블록 내부는 한글의
+    자동 페이지 분할 + 표 속성(헤더 반복/셀 나눔 금지)에 위임.
 
     prefix는 네임스페이스('res' 또는 'cres')로 템플릿 표와 1:1 매칭됨.
     """
     if not blocks:
         return
+
+    break_indices = set(_plan_page_breaks(blocks, ROWS_PER_PAGE))
     global_idx = 0
-    for block in blocks:
+    for i, block in enumerate(blocks):
+        if i in break_indices:
+            _insert_page_break_before_row(hwp, prefix, global_idx)
         for row in block.rows:
             _write_detail_row(hwp, prefix, global_idx, block.name, row)
             global_idx += 1
         _write_detail_summary_row(hwp, prefix, global_idx, block)
         global_idx += 1
+
+
+def _insert_page_break_before_row(hwp, prefix: str, idx: int) -> None:
+    """idx번째 데이터 행 시작 직전에 페이지 강제 분할.
+
+    전략: 해당 행의 ws 누름틀로 `text=False`(누름틀 코드 위치)로 이동하여 셀 시작점에
+    커서를 둔 뒤 `BreakPage` 실행. 헤더 반복은 템플릿의 TableHeaderCell 속성에 위임
+    (gen_template.py가 표 생성 시 복합 헤더 2행을 제목 셀로 지정).
+
+    `text=True`로 누름틀 텍스트 내부에 들어간 상태에서 BreakPage를 실행하면 누름틀
+    안에 페이지 문자가 들어가 페이지가 실제 분할되지 않는 문제가 있었음 — text=False로 해결.
+    """
+    field_name = _ns(prefix, "ws")
+    try:
+        try:
+            hwp.move_to_field(field_name, idx=idx, text=False, start=True)
+        except TypeError:
+            hwp.move_to_field(field_name)
+    except Exception as e:
+        logger.debug(f"move_to_field 실패 ({field_name}[{idx}]): {e}")
+        return
+
+    try:
+        hwp.HAction.Run("TableColBegin")
+    except Exception:
+        pass
+
+    try:
+        hwp.HAction.Run("BreakPage")
+        logger.debug(f"BreakPage OK ({field_name}[{idx}])")
+    except Exception as e:
+        logger.warning(f"BreakPage 실패 ({field_name}[{idx}]): {e}")
 
 
 def _write_detail_row(hwp, prefix: str, idx: int, ws_name: str, row: LandUseRow) -> None:

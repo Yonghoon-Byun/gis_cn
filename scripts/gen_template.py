@@ -121,6 +121,24 @@ def _create_table(hwp, rows: int, cols: int) -> None:
     act.Execute(pset)
 
 
+def _set_table_layout_props(hwp) -> None:
+    """첫 행을 '제목 셀'로 지정 → 쪽마다 헤더 반복. 실패 시 무시.
+
+    주의: 이 함수는 반드시 _create_table 직후, 표가 비어있을 때 호출되어야 함.
+    커서는 표 A1에 있어야 하며, 함수 종료 후 A1에 남도록 한다.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    try:
+        hwp.HAction.Run("TableColBegin")
+        hwp.HAction.Run("TableSelRow")
+        hwp.HAction.Run("TableHeaderCell")
+        hwp.HAction.Run("Cancel")
+        hwp.HAction.Run("TableColBegin")
+    except Exception as e:
+        log.debug(f"TableHeaderCell 설정 실패: {e}")
+
+
 def _move_right(hwp) -> None:
     hwp.HAction.Run("TableRightCell")
 
@@ -191,7 +209,7 @@ def _write_table_with_fields(hwp, title: str, headers, fields: list[str],
     total_rows = len(header_rows) + max(1, data_rows)
     _create_table(hwp, rows=total_rows, cols=n_cols)
 
-    # 헤더 행들 채우기
+    # 헤더 행들 채우기 (커서: A1 → 헤더 전체 순회 → 마지막 데이터 행)
     for hi, hr in enumerate(header_rows):
         if hi > 0:
             _move_next_row_first(hwp)
