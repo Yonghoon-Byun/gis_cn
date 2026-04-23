@@ -1,11 +1,11 @@
 [general]
 name=GIS CN값 계산기
 qgisMinimumVersion=3.0
-description=소유역 폴리곤 기반 CN값 자동 계산 플러그인 (PostGIS + 토양군 + 토지피복도)
-version=0.1
+description=소유역 폴리곤 기반 CN값 자동 계산 플러그인 (PostGIS + 토양군 + 토지피복도) + Excel/한글 보고서 출력
+version=0.2
 author=도화엔지니어링 기술개발연구원
 email=suey@dohwa.co.kr
-about=PostGIS DB에서 수문학적 토양군과 토지피복도를 추출하여 Intersection 후 CN값을 계산합니다.
+about=PostGIS DB에서 수문학적 토양군과 토지피복도를 추출하여 Intersection 후 CN값을 계산하고, Excel(.xlsx) 및 한글(.hwp) 보고서로 내보냅니다.
 tracker=
 repository=
 tags=cn,hydrology,watershed,soil,land_cover
