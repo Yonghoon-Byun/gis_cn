@@ -1305,7 +1305,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             hwp_path = os.path.join(folder, "results.hwpx")
             template = self.leHwpTemplate.text().strip() or DEFAULT_HWP_TEMPLATE
             try:
-                from .core.hwp_renderer import render_hwp, HwpRendererError
+                # 순수 Python(lxml) 렌더러 — 한컴오피스/COM 불필요.
+                from .core.hwpx_writer import render_hwpx, HwpxRenderError
                 # 기준표(표 4-18)는 국가표준 고정표를 build_analysis_result가 자동 로드한다
                 # (cn_reference 미전달). 사용자 편집 CN값(Tab2)은 CN 매칭에만 사용.
                 meta = ProjectMeta(
@@ -1319,8 +1320,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
                     grouped_result1=grouped_r1, grouped_result2=grouped_r2,
                     null_cn_rows=null_cn_rows,
                 )
-                self._recalc_log(f"  HWP 저장 중... ({hwp_path})")
-                render_hwp(result, template, hwp_path)
+                self._recalc_log(f"  HWPX 저장 중... ({hwp_path})")
+                render_hwpx(result, template, hwp_path)
                 self._recalc_log(f"  ✔ HWP 저장 완료")
                 summary_lines.append(f"HWP: {hwp_path}")
             except Exception as e:
@@ -1681,7 +1682,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         self.chkExportExcel = QCheckBox("Excel (.xlsx)")
         self.chkExportExcel.setChecked(True)
-        self.chkExportHwp = QCheckBox("한글 (.hwp)")
+        self.chkExportHwp = QCheckBox("한글 (.hwpx)")
         self.chkExportHwp.setChecked(False)
         format_row.addWidget(self.chkExportExcel)
         format_row.addWidget(self.chkExportHwp)
@@ -1697,7 +1698,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         self.leHwpTemplate = QLineEdit()
         self.leHwpTemplate.setText(DEFAULT_HWP_TEMPLATE)
-        self.leHwpTemplate.setPlaceholderText("templates/v1.0/cn_report.hwp")
+        self.leHwpTemplate.setPlaceholderText("templates/v1.0/cn_report.hwpx")
         tmpl_row.addWidget(self.leHwpTemplate)
 
         self.btnHwpTemplate = QPushButton("찾아보기")

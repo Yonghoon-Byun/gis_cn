@@ -44,10 +44,14 @@ def main():
     size = MAIN_OUT.stat().st_size
     print(f"wrote: {MAIN_OUT}  ({count} files, {size:,} bytes)")
 
-    # worktree 의 dist 에도 동일하게 복사 (관례 유지)
+    # worktree 의 dist 에도 동일하게 복사 (관례 유지) — 같은 파일이면 생략
     import shutil
-    shutil.copy2(MAIN_OUT, WT_OUT)
-    print(f"mirrored: {WT_OUT}")
+    try:
+        if WT_OUT.resolve() != MAIN_OUT.resolve():
+            shutil.copy2(MAIN_OUT, WT_OUT)
+            print(f"mirrored: {WT_OUT}")
+    except (shutil.SameFileError, OSError) as e:
+        print(f"mirror 생략: {e}")
 
 
 if __name__ == "__main__":
