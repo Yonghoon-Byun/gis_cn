@@ -590,6 +590,26 @@ def _dict_to_summary(d: dict, *, is_composite: bool = False) -> WatershedSummary
     )
 
 
+def load_standard_cn_reference() -> "list[CnReferenceRow]":
+    """표 4-18 국가표준 CN 기준표를 data/cn_reference_std.json 에서 로드(8열).
+
+    기준표는 개발단계·사용자 분석값과 무관한 고정 표준표(재해영향평가 실무지침, 행안부 고시).
+    파일 부재/오류 시 빈 리스트 + 경고(silent-fail 회피). scripts/extract_cn_reference.py 로 재생성.
+    """
+    import json, logging
+    from pathlib import Path
+    log = logging.getLogger(__name__)
+    path = Path(__file__).resolve().parent.parent / "data" / "cn_reference_std.json"
+    if not path.exists():
+        log.warning("표준 CN 기준표 없음: %s (scripts/extract_cn_reference.py 로 생성)", path)
+        return []
+    try:
+        return [CnReferenceRow.from_std(d) for d in json.loads(path.read_text(encoding="utf-8"))]
+    except Exception as e:
+        log.warning("표준 CN 기준표 로드 실패 (%s): %s", path, e)
+        return []
+
+
 def build_analysis_result(result1_data: list,
                           result2_data: list,
                           *,
@@ -601,19 +621,26 @@ def build_analysis_result(result1_data: list,
                           map_images: list = None,
                           notes: str = "") -> AnalysisResult:
     """list[dict] 기반 기존 계산 결과를 `AnalysisResult`로 변환."""
+    # 표 4-18 기준표: 명시 전달(override) 없으면 국가표준 고정표(8열)를 자동 로드.
     ref_rows: list[CnReferenceRow] = []
-    for row in (cn_reference or []):
-        if isinstance(row, CnReferenceRow):
-            ref_rows.append(row)
-        elif isinstance(row, dict):
-            ref_rows.append(CnReferenceRow(
-                land_use=row.get('토지이용분류') or row.get('land_use') or '',
-                a=row.get('A'), b=row.get('B'), c=row.get('C'), d=row.get('D'),
-            ))
-        else:
-            # tuple/list: (land_use, a, b, c, d)
-            lu, a, b, c, d = (list(row) + [None]*5)[:5]
-            ref_rows.append(CnReferenceRow(land_use=lu, a=a, b=b, c=c, d=d))
+    if cn_reference:
+        for row in cn_reference:
+            if isinstance(row, CnReferenceRow):
+                ref_rows.append(row)
+            elif isinstance(row, dict):
+                # std JSON 항목('lu' 키)이면 8열로, 아니면 기존 5열 매핑
+                ref_rows.append(
+                    CnReferenceRow.from_std(row) if 'lu' in row else CnReferenceRow(
+                        land_use=row.get('토지이용분류') or row.get('land_use') or '',
+                        a=row.get('A'), b=row.get('B'), c=row.get('C'), d=row.get('D'),
+                    )
+                )
+            else:
+                # tuple/list: (land_use, a, b, c, d)
+                lu, a, b, c, d = (list(row) + [None]*5)[:5]
+                ref_rows.append(CnReferenceRow(land_use=lu, a=a, b=b, c=c, d=d))
+    else:
+        ref_rows = load_standard_cn_reference()
 
     null_list: list[NullRow] = []
     for r in (null_cn_rows or []):

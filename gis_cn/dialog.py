@@ -1306,7 +1306,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             template = self.leHwpTemplate.text().strip() or DEFAULT_HWP_TEMPLATE
             try:
                 from .core.hwp_renderer import render_hwp, HwpRendererError
-                cn_ref = self._collect_cn_reference_rows()
+                # 기준표(표 4-18)는 국가표준 고정표를 build_analysis_result가 자동 로드한다
+                # (cn_reference 미전달). 사용자 편집 CN값(Tab2)은 CN 매칭에만 사용.
                 meta = ProjectMeta(
                     project_name=os.path.basename(folder),
                     land_cover_level=self._get_selected_level_key(),
@@ -1315,7 +1316,6 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
                 result = build_analysis_result(
                     result1_data, result2_data,
                     meta=meta,
-                    cn_reference=cn_ref,
                     grouped_result1=grouped_r1, grouped_result2=grouped_r2,
                     null_cn_rows=null_cn_rows,
                 )
