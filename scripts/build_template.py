@@ -25,10 +25,70 @@ if hasattr(sys.stdout, "reconfigure"):
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "gis_cn" / "templates" / "v1.0" / "cn_report.hwpx"
+SAMPLE = ROOT / "gis_cn" / "templates" / "v1.0" / "cn_report_sample.hwpx"
 SECTION = "Contents/section0.xml"
+HEADER = "Contents/header.xml"
 ORIG_MARGIN = {"top": "4252", "bottom": "4252", "left": "4252", "right": "4252",
                "header": "3543", "footer": "3543", "gutter": "0"}
 RES_PREFIX = "res"
+
+
+def _hh(root):
+    ns = None
+    for k, v in root.nsmap.items():
+        if k == "hh":
+            ns = v
+    return ns, (lambda t: f"{{{ns}}}{t}")
+
+
+def add_standard_ref_table(section_root, raw, hp) -> dict:
+    """표 4-18 국가표준 CN 기준표(8열, 정적)를 샘플에서 템플릿으로 이식.
+
+    누름틀 없는 고정표(샘플에 이미 표준값 포함). 누락 charPr(14,15)만 샘플 header에서
+    복사(참조 폰트/테두리는 템플릿에 이미 존재). 기준표 단락을 res 표 단락 앞에 삽입.
+    OWPML 네임스페이스(hp/hh)는 샘플·템플릿 동일(한컴 2011 표준)하여 deepcopy 호환.
+    """
+    info = {"charpr_added": 0, "ref_rows": 0}
+    # idempotency: 이미 8열 기준표가 있으면 중복 삽입 방지
+    for t in section_root.iter(hp("tbl")):
+        if t.get("colCnt") == "8" and "AMC-II" in "".join(
+                x.text or "" for x in (t.find(hp("caption")) if t.find(hp("caption")) is not None else t).iter(hp("t"))):
+            info["skipped"] = True
+            return info
+    smp_sec = etree.fromstring(zipfile.ZipFile(SAMPLE).read(SECTION), etree.XMLParser(huge_tree=True))
+    sns = smp_sec.nsmap.get("hp")
+    shp = lambda t: f"{{{sns}}}{t}"
+    ref_tbl = next(
+        t for t in smp_sec.iter(shp("tbl"))
+        if "AMC-II" in "".join(x.text or "" for x in
+                              (t.find(shp("caption")) if t.find(shp("caption")) is not None else t).iter(shp("t")))
+        and t.get("colCnt") == "8")
+    ref_p = ref_tbl.getparent().getparent()      # tbl -> run -> p
+    info["ref_rows"] = len(ref_tbl.findall(shp("tr")))
+
+    # header.xml: charPr 14,15 복사 (참조 폰트/테두리는 기존재 — 사전 실측 확인)
+    hdr = etree.fromstring(raw[HEADER], etree.XMLParser(huge_tree=True))
+    _, hh = _hh(hdr)
+    char_container = next(cp for cp in hdr.iter(hh("charPr"))).getparent()
+    existing = {cp.get("id") for cp in char_container.findall(hh("charPr"))}
+    smp_hdr = etree.fromstring(zipfile.ZipFile(SAMPLE).read(HEADER), etree.XMLParser(huge_tree=True))
+    _, shh = _hh(smp_hdr)
+    for cid in ("14", "15"):
+        if cid in existing:
+            continue
+        src = next(cp for cp in smp_hdr.iter(shh("charPr")) if cp.get("id") == cid)
+        char_container.append(deepcopy(src))
+        info["charpr_added"] += 1
+    if char_container.get("itemCnt") is not None:
+        char_container.set("itemCnt", str(len(char_container.findall(hh("charPr")))))
+    raw[HEADER] = etree.tostring(hdr, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+    # 기준표 단락을 res 표 단락 앞에 삽입 (보고서 순서: 표4-18 → 표4-19)
+    res_tbl = next(t for t in section_root.iter(hp("tbl"))
+                   if any((fb.get("name") or "").startswith(RES_PREFIX + ".")
+                          for fb in t.iter(hp("fieldBegin"))))
+    res_tbl.getparent().getparent().addprevious(deepcopy(ref_p))
+    return info
 
 
 def _ns(root):
@@ -97,6 +157,10 @@ def clean_template(src: Path, out: Path) -> dict:
                 mg.set(k, v)
             stats["margins"] += 1
 
+    # 4.5) 표 4-18 국가표준 CN 기준표(정적 8열) 이식
+    ref_info = add_standard_ref_table(root, raw, hp)
+    stats.update(ref_info)
+
     # 5) 검증 — 모든 표 rowAddr 범위·연속, 그리드 타일링
     _validate(root, hp)
 
@@ -150,6 +214,10 @@ def main() -> int:
     print(f"  쓰레기 표 제거: {stats['junk_removed']}개")
     print(f"  res 행: {stats['res_rows_before']} → {stats['res_rows_after']} (헤더 + 프로토타입 1)")
     print(f"  여백 적용: pagePr margin {stats['margins']}개 (사방 15mm)")
+    if stats.get("skipped"):
+        print("  표4-18 기준표: 이미 존재(건너뜀)")
+    else:
+        print(f"  표4-18 기준표 이식: {stats.get('ref_rows', 0)}행, charPr +{stats.get('charpr_added', 0)}")
     print("  검증 통과 ✓")
     return 0
 
