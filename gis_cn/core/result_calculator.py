@@ -6,6 +6,7 @@ from qgis.core import QgsVectorLayer
 from .analysis_result import (
     AnalysisResult, ProjectMeta, WatershedBlock, WatershedSummary,
     LandUseRow, CnReferenceRow, NullRow, MapImage,
+    StagedReport, CnDeltaRow, STAGE_PRE, STAGE_DURING, STAGE_POST, DEFAULT_STAGE_ORDER,
 )
 
 logger = logging.getLogger(__name__)
@@ -659,6 +660,60 @@ def build_analysis_result(result1_data: list,
         map_images=list(map_images or []),
         null_cn_rows=null_list,
         notes=notes,
+    )
+
+
+def build_cn_delta(stage_summaries: "dict[str, list[WatershedSummary]]") -> "list[CnDeltaRow]":
+    """표 4-17: 소유역별 개발 전/중/후 AMC-Ⅲ CN 변화 + 증감(②-①, ③-①).
+
+    단계 간 소유역은 **동일명으로 정렬**(1차 정책). 증감은 항상 개발 전(①) 기준의 차(float).
+    개발 전이 없는 소유역(개발 중/후 신설)은 증감 None. reason_* 는 빈 문자열(사용자 입력 자리).
+    소유역 순서는 개발 전→중→후 순회하며 처음 등장 순서를 유지한다.
+    """
+    by_stage = {st: {s.name: s.amc3_cn for s in rows} for st, rows in stage_summaries.items()}
+    pre = by_stage.get(STAGE_PRE, {})
+    during = by_stage.get(STAGE_DURING, {})
+    post = by_stage.get(STAGE_POST, {})
+
+    ws_names: list[str] = []
+    seen: set[str] = set()
+    for st in DEFAULT_STAGE_ORDER:
+        for s in stage_summaries.get(st, []):
+            if s.name not in seen:
+                seen.add(s.name)
+                ws_names.append(s.name)
+
+    rows: list[CnDeltaRow] = []
+    for ws in ws_names:
+        cn_pre = pre.get(ws)
+        cn_during = during.get(ws)
+        cn_post = post.get(ws)
+        dd = (cn_during - cn_pre) if (cn_during is not None and cn_pre is not None) else None
+        dp = (cn_post - cn_pre) if (cn_post is not None and cn_pre is not None) else None
+        rows.append(CnDeltaRow(
+            watershed=ws, cn_pre=cn_pre,
+            cn_during=cn_during, delta_during=dd,
+            cn_post=cn_post, delta_post=dp,
+        ))
+    return rows
+
+
+def assemble_staged_report(stage_results: "dict[str, AnalysisResult]", *,
+                           meta: ProjectMeta = None) -> StagedReport:
+    """단계별 `AnalysisResult`들을 다단계 비교 `StagedReport`로 조립(옵션 C).
+
+    계산엔진은 단계와 직교 — 각 단계는 기존 `calculate_results`/`build_analysis_result`로
+    독립 산출된 뒤 여기서 결합된다. 표 4-17(증감 비교표)은 각 단계의 summary_rows로부터
+    `build_cn_delta`로 생성하고, 표 4-18 기준표(단계 무관)는 국가표준표를 1회 로드한다.
+    """
+    order = [s for s in DEFAULT_STAGE_ORDER if s in stage_results]
+    stage_summaries = {st: stage_results[st].summary_rows for st in order}
+    return StagedReport(
+        meta=meta or ProjectMeta(),
+        stages=dict(stage_results),
+        stage_order=order,
+        cn_delta_rows=build_cn_delta(stage_summaries),
+        cn_reference=load_standard_cn_reference(),
     )
 
 
