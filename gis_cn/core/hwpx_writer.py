@@ -219,10 +219,10 @@ def _render_dynamic_table(doc: _Doc, table, field_prefix: str,
     table.set("rowCnt", str(len(all_rows)))
 
 
-def _res_row(prefix: str, ws: str, row: LandUseRow) -> "dict[str, str]":
+def _res_row(prefix: str, stage: str, ws: str, row: LandUseRow) -> "dict[str, str]":
     p = lambda local: f"{prefix}.{local}"
     return {
-        p("ws"): ws, p("lu"): row.land_use,
+        p("stage"): stage, p("ws"): ws, p("lu"): row.land_use,
         p("a_area"): _fmt_area(row.a_area), p("a_cn"): _fmt_cn(row.a_cn),
         p("b_area"): _fmt_area(row.b_area), p("b_cn"): _fmt_cn(row.b_cn),
         p("c_area"): _fmt_area(row.c_area), p("c_cn"): _fmt_cn(row.c_cn),
@@ -232,10 +232,10 @@ def _res_row(prefix: str, ws: str, row: LandUseRow) -> "dict[str, str]":
     }
 
 
-def _res_summary_row(prefix: str, block: WatershedBlock) -> "dict[str, str]":
+def _res_summary_row(prefix: str, stage: str, block: WatershedBlock) -> "dict[str, str]":
     p = lambda local: f"{prefix}.{local}"
     return {
-        p("ws"): block.name, p("lu"): "합계",
+        p("stage"): stage, p("ws"): block.name, p("lu"): "합계",
         p("a_area"): _fmt_area(block.total_a or None), p("a_cn"): "",
         p("b_area"): _fmt_area(block.total_b or None), p("b_cn"): "",
         p("c_area"): _fmt_area(block.total_c or None), p("c_cn"): "",
@@ -245,13 +245,17 @@ def _res_summary_row(prefix: str, block: WatershedBlock) -> "dict[str, str]":
     }
 
 
-def _detail_rows(blocks: "list[WatershedBlock]", prefix: str) -> "list[dict[str, str]]":
-    """소유역 블록들 → res 표 데이터행 dict 리스트 (블록별 토지이용행 + 합계행)."""
+def _detail_rows(blocks: "list[WatershedBlock]", prefix: str, stage: str = "") -> "list[dict[str, str]]":
+    """소유역 블록들 → res 표 데이터행 dict 리스트 (블록별 토지이용행 + 합계행).
+
+    stage 가 주어지면 각 행의 단계(res.stage) 셀에 채운다(다단계 보고서의 단계 구분).
+    템플릿에 res.stage 누름틀이 없으면 fill_field 가 조용히 무시(단일단계 호환).
+    """
     out: list[dict] = []
     for block in blocks:
         for row in block.rows:
-            out.append(_res_row(prefix, block.name, row))
-        out.append(_res_summary_row(prefix, block))
+            out.append(_res_row(prefix, stage, block.name, row))
+        out.append(_res_summary_row(prefix, stage, block))
     return out
 
 
@@ -335,7 +339,7 @@ def render_hwpx(result: AnalysisResult, template, out, *, apply_orig_margin: boo
     res_tbl = doc.find_table_with_field(RES_PREFIX)
     if res_tbl is None:
         raise HwpxRenderError(f"템플릿에 '{RES_PREFIX}.*' 산정결과표 없음")
-    data_rows = _detail_rows(result.detail_blocks, RES_PREFIX)
+    data_rows = _detail_rows(result.detail_blocks, RES_PREFIX, stage=result.meta.development_stage)
     if not data_rows:
         raise HwpxRenderError("산정결과 데이터가 비어 있습니다 (detail_blocks 없음)")
     _render_dynamic_table(doc, res_tbl, RES_PREFIX, data_rows)
@@ -411,16 +415,16 @@ def render_staged_report(report: StagedReport, template, out, *, apply_orig_marg
     if delta_tbl is not None and report.cn_delta_rows:
         _render_dynamic_table(doc, delta_tbl, DELTA_PREFIX, _delta_rows_data(report.cn_delta_rows))
 
-    # 표 4-19 산정결과표 (res.*) — 전체 단계 블록 누적 (B-1 단계페이지 분리는 후속)
+    # 표 4-19 산정결과표 (res.*) — 단계별 행에 res.stage 로 단계 표시(전체 단계 누적).
     res_tbl = doc.find_table_with_field(RES_PREFIX)
-    all_blocks: list[WatershedBlock] = []
-    for _stage, ares in report.ordered_stages():
-        all_blocks.extend(ares.detail_blocks)
-    if res_tbl is not None and all_blocks:
-        _render_dynamic_table(doc, res_tbl, RES_PREFIX, _detail_rows(all_blocks, RES_PREFIX))
+    res_data: list[dict] = []
+    for stage_name, ares in report.ordered_stages():
+        res_data.extend(_detail_rows(ares.detail_blocks, RES_PREFIX, stage=stage_name))
+    if res_tbl is not None and res_data:
+        _render_dynamic_table(doc, res_tbl, RES_PREFIX, res_data)
 
     _validate(doc)
     doc.save(out)
-    logger.info("HWPX(다단계) 저장: %s (delta %d, res %d블록)",
-                out, len(report.cn_delta_rows), len(all_blocks))
+    logger.info("HWPX(다단계) 저장: %s (delta %d, res %d행)",
+                out, len(report.cn_delta_rows), len(res_data))
     return out

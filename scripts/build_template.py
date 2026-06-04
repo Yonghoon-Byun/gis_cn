@@ -118,10 +118,18 @@ def _field_prototype(section_root, hp):
     return deepcopy(begin_ctrl), deepcopy(end_ctrl)
 
 
-def _inject_field(cell, begin_proto, end_proto, name, hp, fresh):
+_FIELD_UID = [700_000_000]
+
+
+def _fresh_field_id() -> str:
+    _FIELD_UID[0] += 1
+    return str(_FIELD_UID[0])
+
+
+def _inject_field(cell, begin_proto, end_proto, name, hp):
     """셀의 첫 run 을 CLICK_HERE 누름틀(name)로 교체(기존 텍스트 제거, 빈 값 셀필드)."""
     begin, end = deepcopy(begin_proto), deepcopy(end_proto)
-    nid, nfid = fresh(), fresh()
+    nid, nfid = _fresh_field_id(), _fresh_field_id()
     fb = begin.find(hp("fieldBegin")); fb.set("name", name); fb.set("id", nid); fb.set("fieldid", nfid)
     fe = end.find(hp("fieldEnd")); fe.set("beginIDRef", nid); fe.set("fieldid", nfid)
     for t in cell.iter(hp("t")):             # 셀 내 모든 텍스트 비움
@@ -162,15 +170,11 @@ def add_delta_table(section_root, raw, hp) -> dict:
         new_tbl.remove(tr)
 
     begin_proto, end_proto = _field_prototype(section_root, hp)
-    _uid = [800_000_000]
-    def fresh():
-        _uid[0] += 1
-        return str(_uid[0])
     for tc in prototype.findall(hp("tc")):
         col = int(tc.find(hp("cellAddr")).get("colAddr"))
         name = DELTA_COL_FIELDS.get(col)
         if name:
-            _inject_field(tc, begin_proto, end_proto, name, hp, fresh)
+            _inject_field(tc, begin_proto, end_proto, name, hp)
             info["delta_fields"] += 1
 
     all_rows = new_tbl.findall(hp("tr"))
@@ -229,6 +233,33 @@ def clean_template(src: Path, out: Path) -> dict:
             ca.set("rowAddr", str(pos))
     real_res.set("rowCnt", str(len(all_rows)))
     stats["res_rows_after"] = len(all_rows)
+
+    # 3.5) res 표 c0(단계) 셀에 res.stage 누름틀 주입 (다단계 단계 표시)
+    proto = next((tr for tr in real_res.findall(hp("tr"))
+                  if any((fb.get("name") or "").startswith(RES_PREFIX + ".")
+                         for fb in tr.iter(hp("fieldBegin")))), None)
+    if proto is not None:
+        c0 = next((tc for tc in proto.findall(hp("tc"))
+                   if tc.find(hp("cellAddr")).get("colAddr") == "0"), None)
+        if c0 is not None and not any(fb.get("name") == "res.stage" for fb in c0.iter(hp("fieldBegin"))):
+            bp, ep = _field_prototype(real_res, hp)
+            _inject_field(c0, bp, ep, "res.stage", hp)
+            stats["res_stage_field"] = True
+
+    # 3.6) 깨진 ref.* 누름틀(표 밖 본문 잔존) 제거 — 기준표는 정적 표4-18로 대체됨
+    removed = 0
+    for fb in list(root.iter(hp("fieldBegin"))):
+        if not (fb.get("name") or "").startswith("ref."):
+            continue
+        ctrl_b = fb.getparent()
+        run = ctrl_b.getparent()
+        for ctrl in list(run.findall(hp("ctrl"))):
+            fe = ctrl.find(hp("fieldEnd"))
+            if fe is not None and fe.get("beginIDRef") == fb.get("id"):
+                run.remove(ctrl)
+        run.remove(ctrl_b)
+        removed += 1
+    stats["orphan_ref_removed"] = removed
 
     # 4) 원본 여백
     for mg in root.iter(hp("margin")):
