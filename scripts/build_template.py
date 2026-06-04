@@ -101,6 +101,86 @@ def _res_field_count(tbl, hp) -> int:
               if (fb.get("name") or "").startswith(RES_PREFIX + "."))
 
 
+# 표 4-17 비교표 열(colAddr) → delta.* 누름틀 매핑
+DELTA_COL_FIELDS = {
+    0: "delta.ws", 1: "delta.cn_pre", 2: "delta.cn_during", 3: "delta.delta_during",
+    4: "delta.reason_during", 5: "delta.cn_post", 6: "delta.delta_post", 7: "delta.reason_post",
+}
+
+
+def _field_prototype(section_root, hp):
+    """템플릿 res 셀에서 CLICK_HERE 누름틀(fieldBegin/fieldEnd ctrl) 프로토타입 추출."""
+    fb = next(fb for fb in section_root.iter(hp("fieldBegin"))
+              if (fb.get("name") or "").startswith("res."))
+    begin_ctrl = fb.getparent()              # <hp:ctrl> wrapping fieldBegin
+    run = begin_ctrl.getparent()
+    end_ctrl = next(c for c in run.findall(hp("ctrl")) if c.find(hp("fieldEnd")) is not None)
+    return deepcopy(begin_ctrl), deepcopy(end_ctrl)
+
+
+def _inject_field(cell, begin_proto, end_proto, name, hp, fresh):
+    """셀의 첫 run 을 CLICK_HERE 누름틀(name)로 교체(기존 텍스트 제거, 빈 값 셀필드)."""
+    begin, end = deepcopy(begin_proto), deepcopy(end_proto)
+    nid, nfid = fresh(), fresh()
+    fb = begin.find(hp("fieldBegin")); fb.set("name", name); fb.set("id", nid); fb.set("fieldid", nfid)
+    fe = end.find(hp("fieldEnd")); fe.set("beginIDRef", nid); fe.set("fieldid", nfid)
+    for t in cell.iter(hp("t")):             # 셀 내 모든 텍스트 비움
+        t.text = ""
+    run = cell.find(".//" + hp("run"))
+    for ch in list(run):
+        if etree.QName(ch).localname in ("ctrl", "t"):
+            run.remove(ch)
+    run.append(begin); run.append(end)
+    etree.SubElement(run, hp("t")).text = ""
+
+
+def add_delta_table(section_root, raw, hp) -> dict:
+    """표 4-17 개발단계별 소유역 CN 변화 비교표를 샘플에서 이식 + delta.* 누름틀 주입.
+
+    헤더(2행) + 프로토타입 데이터 1행으로 축소(런타임 동적 복제). 보고서 순서상
+    맨 앞(표4-17 → 표4-18 → 표4-19)에 삽입. 스타일(charPr/borderFill) 템플릿 호환 실측.
+    """
+    info = {"delta_fields": 0}
+    for t in section_root.iter(hp("tbl")):
+        if any((fb.get("name") or "").startswith("delta.") for fb in t.iter(hp("fieldBegin"))):
+            info["skipped"] = True
+            return info
+    smp = etree.fromstring(zipfile.ZipFile(SAMPLE).read(SECTION), etree.XMLParser(huge_tree=True))
+    sns = smp.nsmap.get("hp"); shp = lambda t: f"{{{sns}}}{t}"
+    full = lambda el: "".join(x.text or "" for x in el.iter(shp("t")))
+    src_tbl = next(t for t in smp.iter(shp("tbl")) if t.find(shp("caption")) is not None
+                   and "유출곡선지수" in full(t.find(shp("caption")))
+                   and "변화" in full(t.find(shp("caption"))))
+    new_p = deepcopy(src_tbl.getparent().getparent())   # tbl -> run -> p
+    next(section_root.iter(hp("tbl"))).getparent().getparent().addprevious(new_p)
+
+    new_tbl = next(new_p.iter(hp("tbl")))
+    trs = new_tbl.findall(hp("tr"))
+    header_n = 2                              # r0,r1 = 복합 헤더, r2 = 프로토타입 데이터
+    prototype = trs[header_n]
+    for tr in trs[header_n + 1:]:
+        new_tbl.remove(tr)
+
+    begin_proto, end_proto = _field_prototype(section_root, hp)
+    _uid = [800_000_000]
+    def fresh():
+        _uid[0] += 1
+        return str(_uid[0])
+    for tc in prototype.findall(hp("tc")):
+        col = int(tc.find(hp("cellAddr")).get("colAddr"))
+        name = DELTA_COL_FIELDS.get(col)
+        if name:
+            _inject_field(tc, begin_proto, end_proto, name, hp, fresh)
+            info["delta_fields"] += 1
+
+    all_rows = new_tbl.findall(hp("tr"))
+    for pos, tr in enumerate(all_rows):
+        for ca in tr.iter(hp("cellAddr")):
+            ca.set("rowAddr", str(pos))
+    new_tbl.set("rowCnt", str(len(all_rows)))
+    return info
+
+
 def clean_template(src: Path, out: Path) -> dict:
     zin = zipfile.ZipFile(src)
     names = zin.namelist()
@@ -158,8 +238,12 @@ def clean_template(src: Path, out: Path) -> dict:
             stats["margins"] += 1
 
     # 4.5) 표 4-18 국가표준 CN 기준표(정적 8열) 이식
-    ref_info = add_standard_ref_table(root, raw, hp)
-    stats.update(ref_info)
+    stats.update(add_standard_ref_table(root, raw, hp))
+
+    # 4.6) 표 4-17 개발단계별 CN 변화 비교표(delta.* 누름틀) 이식 — 맨 앞
+    delta_info = add_delta_table(root, raw, hp)
+    stats["delta_fields"] = delta_info.get("delta_fields", 0)
+    stats["delta_skipped"] = delta_info.get("skipped", False)
 
     # 5) 검증 — 모든 표 rowAddr 범위·연속, 그리드 타일링
     _validate(root, hp)
@@ -218,6 +302,10 @@ def main() -> int:
         print("  표4-18 기준표: 이미 존재(건너뜀)")
     else:
         print(f"  표4-18 기준표 이식: {stats.get('ref_rows', 0)}행, charPr +{stats.get('charpr_added', 0)}")
+    if stats.get("delta_skipped"):
+        print("  표4-17 비교표: 이미 존재(건너뜀)")
+    else:
+        print(f"  표4-17 비교표 이식: delta.* 누름틀 {stats.get('delta_fields', 0)}개")
     print("  검증 통과 ✓")
     return 0
 

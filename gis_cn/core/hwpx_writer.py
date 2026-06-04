@@ -21,7 +21,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 
-from .analysis_result import AnalysisResult, WatershedBlock, LandUseRow
+from .analysis_result import (
+    AnalysisResult, WatershedBlock, LandUseRow, StagedReport, CnDeltaRow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -341,4 +343,84 @@ def render_hwpx(result: AnalysisResult, template, out, *, apply_orig_margin: boo
     _validate(doc)
     doc.save(out)
     logger.info("HWPX 저장: %s (res %d행, meta %d필드)", out, len(data_rows), filled_meta)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 다단계 비교 보고서 (StagedReport) — 표4-17 비교표 + 표4-19 단계 결과
+# ─────────────────────────────────────────────────────────────────────────────
+
+DELTA_PREFIX = "delta"
+
+
+def _fmt_increment(v) -> str:
+    """표 4-17 증감 표기: 증가 '증) X.XX' / 감소 '감) X.XX' / 변화없음·없음 '-'."""
+    if v is None:
+        return "-"
+    if v > 0:
+        return f"증) {v:.2f}"
+    if v < 0:
+        return f"감) {abs(v):.2f}"
+    return "-"
+
+
+def _delta_rows_data(rows: "list[CnDeltaRow]") -> "list[dict[str, str]]":
+    out: list[dict] = []
+    for r in rows:
+        out.append({
+            "delta.ws": r.watershed,
+            "delta.cn_pre": _fmt_cn(r.cn_pre),
+            "delta.cn_during": _fmt_cn(r.cn_during),
+            "delta.delta_during": _fmt_increment(r.delta_during),
+            "delta.reason_during": r.reason_during or "",
+            "delta.cn_post": _fmt_cn(r.cn_post),
+            "delta.delta_post": _fmt_increment(r.delta_post),
+            "delta.reason_post": r.reason_post or "",
+        })
+    return out
+
+
+def render_staged_report(report: StagedReport, template, out, *, apply_orig_margin: bool = True) -> Path:
+    """`StagedReport`(개발 전/중/후) → HWPX. 한컴/COM 불필요.
+
+    채움: 메타 + 표4-17 비교표(cn_delta_rows) + 표4-19 산정결과표.
+    표4-18 기준표는 정적(템플릿 내장)이라 손대지 않는다.
+    (현재 표4-19는 전체 단계 블록을 한 표에 누적 — 단계별 페이지 분리 B-1은 후속 F3b.)
+    """
+    etree = _import_lxml()
+    template, out = Path(template), Path(out)
+    if not template.exists():
+        raise HwpxRenderError(f"템플릿을 찾을 수 없습니다: {template}")
+
+    doc = _Doc(etree, template)
+    if apply_orig_margin:
+        doc.set_margins(ORIG_MARGIN)
+
+    m = report.meta
+    meta_vals = {
+        "meta.project_name": m.project_name, "meta.site_name": m.site_name,
+        "meta.author": m.author, "meta.organization": m.organization,
+        "meta.analysis_date": m.analysis_date.isoformat(),
+        "meta.development_stage": " / ".join(s for s, _ in report.ordered_stages()) or m.development_stage,
+    }
+    for k, v in meta_vals.items():
+        doc.fill_field(doc.root, k, v)
+
+    # 표 4-17 비교표 (delta.*)
+    delta_tbl = doc.find_table_with_field(DELTA_PREFIX)
+    if delta_tbl is not None and report.cn_delta_rows:
+        _render_dynamic_table(doc, delta_tbl, DELTA_PREFIX, _delta_rows_data(report.cn_delta_rows))
+
+    # 표 4-19 산정결과표 (res.*) — 전체 단계 블록 누적 (B-1 단계페이지 분리는 후속)
+    res_tbl = doc.find_table_with_field(RES_PREFIX)
+    all_blocks: list[WatershedBlock] = []
+    for _stage, ares in report.ordered_stages():
+        all_blocks.extend(ares.detail_blocks)
+    if res_tbl is not None and all_blocks:
+        _render_dynamic_table(doc, res_tbl, RES_PREFIX, _detail_rows(all_blocks, RES_PREFIX))
+
+    _validate(doc)
+    doc.save(out)
+    logger.info("HWPX(다단계) 저장: %s (delta %d, res %d블록)",
+                out, len(report.cn_delta_rows), len(all_blocks))
     return out
