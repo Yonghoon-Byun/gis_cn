@@ -1310,7 +1310,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         # Excel 출력
         if want_excel:
-            excel_path = os.path.join(folder, "results.xlsx")
+            excel_path = os.path.join(folder, "result.xlsx")
             try:
                 self._recalc_log(f"  Excel 저장 중... ({excel_path})")
                 export_results(result1_data, result2_data, excel_path,
@@ -1325,7 +1325,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         # HWP 출력 (부분 실패 허용) — HWPX(zip+xml) 포맷으로 저장
         if want_hwp:
-            hwp_path = os.path.join(folder, "results.hwpx")
+            hwp_path = os.path.join(folder, "result.hwpx")
             template = DEFAULT_HWP_TEMPLATE        # 내장 템플릿 고정 사용
             try:
                 # 순수 Python(lxml) 렌더러 — 한컴오피스/COM 불필요.
@@ -1926,7 +1926,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         v.setSpacing(10)
         v.setContentsMargins(16, 14, 16, 14)
 
-        self.chkStaged = QCheckBox("개발 전/중/후 3단계 비교 보고서로 출력 (표 4-17 증감비교)")
+        self.chkStaged = QCheckBox("비교 검토 기능")
         self.chkStaged.setStyleSheet(
             "font-size: 14px; font-weight: bold; color: #374151; border: none;")
         self.chkStaged.setChecked(False)
@@ -2013,10 +2013,26 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
                 self.chkExportHwp.setChecked(True)
 
     def _save_to_memory(self, name: str, layer):
-        """레이어의 CN 계산 결과를 '이름'으로 메모리에 저장(스냅샷). 같은 이름은 덮어쓴다."""
+        """레이어의 CN 계산 결과를 '이름'으로 메모리에 저장(스냅샷). 같은 이름은 덮어쓴다.
+
+        유역합성 그룹이 정의돼 있으면 합성 결과(composite)도 함께 스냅샷에 담아
+        Excel/한글 보고서(표4-19)에 유역합성 산정결과가 누락되지 않도록 한다.
+        """
         try:
             r1, r2, _null = calculate_results(layer)
-            ares = build_analysis_result(r1, r2, meta=self._build_staged_meta(name))
+            grouped_r1, grouped_r2 = None, None
+            groups = self._get_watershed_groups()
+            if groups:
+                try:
+                    grouped_r1, grouped_r2 = calculate_grouped_results(layer, groups)
+                    self._recalc_log(f"   ✔ 유역합성 {len(grouped_r1 or [])}개 그룹 포함")
+                except Exception as ge:
+                    logger.exception("유역합성 계산 오류(메모리 저장)")
+                    self._recalc_log(f"   [경고] 유역합성 계산 실패(개별 결과만 저장): {ge}")
+                    grouped_r1, grouped_r2 = None, None
+            ares = build_analysis_result(
+                r1, r2, meta=self._build_staged_meta(name),
+                grouped_result1=grouped_r1, grouped_result2=grouped_r2)
         except Exception as e:
             logger.exception("메모리 저장 계산 오류")
             self._recalc_log(f"   [경고] '{name}' 메모리 저장 실패: {e}")
@@ -2150,6 +2166,34 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
                         item.setTextAlignment(Qt.AlignCenter)
                 tbl.setItem(r, c, item)
 
+    def _refresh_composite_from_groups(self, present, sel, pool):
+        """내보내기 시점의 유역합성 그룹 정의로 각 단계 스냅샷의 합성(composite) 결과를 갱신.
+
+        합성 산정결과는 스냅샷에 고정돼 있어, CN계산 *이후* 그룹을 정의/변경하면 3단계
+        보고서(Excel·한글)에 유역합성이 빠진다. 스냅샷이 가리키는 레이어로부터 현재 그룹으로
+        합성 블록을 재계산해 주입(단일단계 경로와 동일하게 내보내기 시점 계산). 레이어가
+        사라졌거나 그룹이 없으면 기존 스냅샷 값을 유지한다(graceful).
+        """
+        groups = self._get_watershed_groups()
+        if not groups:
+            return
+        from qgis.core import QgsProject
+        for s in present:
+            slot = pool[sel[s]]
+            layer = QgsProject.instance().mapLayer(slot.get('layer_id') or "")
+            if layer is None:
+                continue
+            try:
+                gr1, gr2 = calculate_grouped_results(layer, groups)
+                tmp = build_analysis_result([], [], grouped_result1=gr1, grouped_result2=gr2)
+                ares = slot['result']
+                ares.composite_detail = tmp.composite_detail
+                ares.composite_summary = tmp.composite_summary
+                self._recalc_log(f"  '{s}' 유역합성 {len(gr1 or [])}개 그룹 반영")
+            except Exception as e:
+                logger.exception("유역합성 재계산 오류(내보내기)")
+                self._recalc_log(f"  [경고] '{s}' 유역합성 재계산 실패(기존 값 유지): {e}")
+
     def _staged_build_report(self, *, announce: bool = True):
         """메모리에 저장된 단계 슬롯(스냅샷)으로 StagedReport 조립. 실패 시 None.
 
@@ -2178,6 +2222,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         prev_reasons = self._collect_staged_reasons()
         stage_results = {s: pool[sel[s]]['result'] for s in present}
+        # 내보내기 시점의 유역합성 그룹으로 합성 결과 최신화(CN계산 후 그룹을 정의/변경한 경우 누락 방지)
+        self._refresh_composite_from_groups(present, sel, pool)
         report = assemble_staged_report(stage_results, meta=self._build_staged_meta())
         for row in report.cn_delta_rows:        # 사유 재주입(이름 키 — cn_delta_rows 소유역명 유일)
             keep = prev_reasons.get(row.watershed)
@@ -2223,7 +2269,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         # 한글(.hwpx) — 표4-17 증감 + 표4-18 기준 + 표4-19 단계 결과
         if want_hwp:
-            hwp_path = os.path.join(folder, "results_3stage.hwpx")
+            hwp_path = os.path.join(folder, "result.hwpx")
             template = DEFAULT_HWP_TEMPLATE        # 내장 템플릿 고정 사용
             try:
                 from .core.hwpx_writer import render_staged_report
@@ -2238,7 +2284,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
 
         # Excel — 하나의 파일에 단계별 시트(개발 전/중/후)
         if want_excel:
-            xpath = os.path.join(folder, "results_3stage.xlsx")
+            xpath = os.path.join(folder, "result.xlsx")
             try:
                 export_excel_staged(report.ordered_stages(), xpath)
                 self._recalc_log(f"  ✔ Excel 저장(단계별 시트): {os.path.basename(xpath)}")
@@ -2303,6 +2349,11 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             "  background-color: #1f2937; border-radius: 3px;"
             "}"
         )
+        # 숨김 상태에서도 자리(높이)를 유지 → 계산 중 표시될 때 레이아웃이 밀리며
+        # 위젯이 겹쳐 그려지는(씹힘) 현상 방지.
+        _sp = self.progressBarCalc.sizePolicy()
+        _sp.setRetainSizeWhenHidden(True)
+        self.progressBarCalc.setSizePolicy(_sp)
         self.progressBarCalc.setVisible(False)
         card_layout.addWidget(self.progressBarCalc)
 
@@ -2338,6 +2389,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         # 유역합성 카드를 먼저 삽입 (토글 접힘 상태)
         self._setup_watershed_group_card(outer_layout)
         # CN값 계산 카드를 유역합성 아래에 삽입
+        self._applyCard = card      # 계산 중 강제 repaint 대상(잔상/씹힘 방지)
         outer_layout.insertWidget(1, card)
 
         # Tab 3 전체를 QScrollArea로 감싸기 (창 축소 시 찌그러짐 방지)
@@ -2663,6 +2715,9 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.progressBarCalc.setVisible(True)
         self.progressBarCalc.setMaximum(5)
         self.progressBarCalc.setValue(0)
+        # 자리 확보 후 즉시 클린 리페인트 — processEvents 반복 시 잔상(씹힘) 방지
+        if hasattr(self, '_applyCard'):
+            self._applyCard.repaint()
         self.btnApplyCn.setEnabled(False)
         from qgis.PyQt.QtWidgets import QApplication
         try:
@@ -2728,6 +2783,8 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             self.progressBarCalc.setValue(0)
         finally:
             self.btnApplyCn.setEnabled(True)
+            if hasattr(self, '_applyCard'):     # 잔여 스테일 픽셀 정리(최종 클린 프레임)
+                self._applyCard.update()
 
     def _load_xlsx_as_layer(self, path: str, name: str, sheet: str = "Sheet1"):
         """xlsx 파일의 특정 시트를 QGIS 테이블 레이어로 프로젝트에 추가."""

@@ -108,6 +108,7 @@ class _Doc:
         if not self.ns:
             raise HwpxRenderError("템플릿 네임스페이스(hp) 누락 — OWPML 형식 아님")
         self._uid = 900_000_000
+        self._bsmap = None      # borderFill 이중선→실선 매핑 캐시(_border_solid_map)
 
     def hp(self, tag: str) -> str:
         return f"{{{self.ns}}}{tag}"
@@ -135,6 +136,44 @@ class _Doc:
                     mg.set(k, v)
                 n += 1
         return n
+
+    def border_solid_map(self) -> "dict[str, str]":
+        """header.xml borderFill 중 윗변 이중선(DOUBLE_SLIM)을 좌/우/아래 동일 + 윗변 실선(SOLID)
+        borderFill id 로 매핑(없으면 제외). 데이터 행간 중복 이중선 제거용. 결과는 캐시한다."""
+        if self._bsmap is not None:
+            return self._bsmap
+        hdr = self.raw.get("Contents/header.xml")
+        if not hdr:
+            self._bsmap = {}
+            return self._bsmap
+        root = self.etree.fromstring(hdr, self.etree.XMLParser(huge_tree=True))
+        ql = lambda e: self.etree.QName(e).localname
+        defs: dict[str, dict] = {}
+        for bf in root.iter():
+            if ql(bf) != "borderFill":
+                continue
+            d = {}
+            for ch in bf:
+                ln = ql(ch)
+                if ln in ("leftBorder", "rightBorder", "topBorder", "bottomBorder"):
+                    d[ln] = (ch.get("type"), ch.get("width"))
+                elif ln == "fillBrush":      # 셀 배경(음영) — 실선 후보가 배경까지 바꾸지 않도록 키에 포함
+                    d["fill"] = self.etree.tostring(ch)
+            defs[bf.get("id")] = d
+        # 키: (좌,우,아래,배경) — 윗변만 다른(실선) borderFill 매칭(배경 동일 보장)
+        kf = lambda d: (d.get("leftBorder"), d.get("rightBorder"), d.get("bottomBorder"), d.get("fill"))
+        solid_idx: dict[tuple, str] = {}
+        for bid, d in defs.items():
+            t = d.get("topBorder")
+            if t and t[0] == "SOLID":
+                solid_idx.setdefault(kf(d), bid)
+        mapping: dict[str, str] = {}
+        for bid, d in defs.items():
+            t = d.get("topBorder")
+            if t and t[0] == "DOUBLE_SLIM" and kf(d) in solid_idx:
+                mapping[bid] = solid_idx[kf(d)]
+        self._bsmap = mapping
+        return mapping
 
     def fill_field(self, scope, name: str, value: str) -> bool:
         """scope(표 또는 행) 안에서 CLICK_HERE 누름틀(name) 사이에 <hp:t>value</hp:t> 주입."""
@@ -233,6 +272,30 @@ def _render_dynamic_table(doc: _Doc, table, field_prefix: str,
         for ca in tr.iter(hp("cellAddr")):
             ca.set("rowAddr", str(pos))
     table.set("rowCnt", str(len(all_rows)))
+
+    _fix_row_separators(doc, table, len(data_rows))
+
+
+def _fix_row_separators(doc: _Doc, table, n_data: int) -> None:
+    """데이터행 2번째부터 윗변 이중선(DOUBLE_SLIM)을 가는 실선(SOLID)으로 교체.
+
+    템플릿 프로토타입 1행은 헤더 바로 아래라 윗변이 이중선(헤더 구분선)인데, 이를 모든
+    데이터행에 복제하면 행마다 이중선이 그려져 원본과 선스타일이 달라진다. 첫 데이터행만
+    이중선(헤더 구분)으로 두고 나머지는 실선으로 바꿔 원본의 '행간 가는 선'을 재현한다.
+    """
+    if n_data <= 1:
+        return
+    bmap = doc.border_solid_map()
+    if not bmap:
+        return
+    hp = doc.hp
+    all_trs = table.findall(hp("tr"))
+    data_trs = all_trs[len(all_trs) - n_data:]
+    for tr in data_trs[1:]:                  # 첫 데이터행은 헤더 구분선(이중선) 유지
+        for tc in tr.findall(hp("tc")):
+            bid = tc.get("borderFillIDRef")
+            if bid in bmap:
+                tc.set("borderFillIDRef", bmap[bid])
 
 
 def _res_row(prefix: str, stage: str, ws: str, row: LandUseRow) -> "dict[str, str]":
@@ -511,7 +574,10 @@ def render_hwpx(result: AnalysisResult, template, out, *, apply_orig_margin: boo
     res_tbl = doc.find_table_with_field(RES_PREFIX)
     if res_tbl is None:
         raise HwpxRenderError(f"템플릿에 '{RES_PREFIX}.*' 산정결과표 없음")
-    stage_blocks = [(result.meta.development_stage, b) for b in result.detail_blocks]
+    # 개별 소유역 + 유역합성(composite) 블록을 같은 산정결과표(표4-19)에 이어서 출력.
+    stg = result.meta.development_stage
+    stage_blocks = [(stg, b) for b in result.detail_blocks] + \
+                   [(stg, b) for b in result.composite_detail]
     if not stage_blocks:
         raise HwpxRenderError("산정결과 데이터가 비어 있습니다 (detail_blocks 없음)")
     groups_rows = [_group_rows(g, RES_PREFIX) for g in _plan_table_groups(stage_blocks)]
@@ -592,9 +658,13 @@ def render_staged_report(report: StagedReport, template, out, *, apply_orig_marg
 
     # 표 4-19 산정결과표 (res.*) — 단계/소유역 blank-fill + 행수 초과 시 표 물리 분할(다음 장).
     res_tbl = doc.find_table_with_field(RES_PREFIX)
-    stage_blocks = [(stage_name, block)
-                    for stage_name, ares in report.ordered_stages()
-                    for block in ares.detail_blocks]
+    # 각 단계: 개별 소유역 블록 + 유역합성(composite) 블록을 단계별로 묶어 출력(단계 연속성 유지).
+    stage_blocks = []
+    for stage_name, ares in report.ordered_stages():
+        for block in ares.detail_blocks:
+            stage_blocks.append((stage_name, block))
+        for block in ares.composite_detail:
+            stage_blocks.append((stage_name, block))
     res_data: list[dict] = []
     if res_tbl is not None and stage_blocks:
         groups_rows = [_group_rows(g, RES_PREFIX) for g in _plan_table_groups(stage_blocks)]

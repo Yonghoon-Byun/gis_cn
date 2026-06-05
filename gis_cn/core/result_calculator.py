@@ -440,7 +440,7 @@ def export_results(result1_data: list, result2_data: list, path: str = None,
             r += 1
 
         _sc(ws1.cell(r, 1), None, fn, al, ball, num_fmt=nm)
-        _sc(ws1.cell(r, 2), None, fn, al, ball, num_fmt=nm)
+        _sc(ws1.cell(r, 2), '합계', fn, al, ball, num_fmt=nm)
         summary_vals = [
             ws_data['total_A'] or None, None,
             ws_data['total_B'] or None, None,
@@ -489,7 +489,7 @@ def export_results(result1_data: list, result2_data: list, path: str = None,
                 r += 1
 
             _sc(ws1.cell(r, 1), None, fn, al, ball, num_fmt=nm)
-            _sc(ws1.cell(r, 2), None, fn, al, ball, num_fmt=nm)
+            _sc(ws1.cell(r, 2), '합계', fn, al, ball, num_fmt=nm)
             summary_vals = [
                 ws_data['total_A'] or None, None,
                 ws_data['total_B'] or None, None,
@@ -505,7 +505,7 @@ def export_results(result1_data: list, result2_data: list, path: str = None,
                 _sc(ws1.cell(r, c), None, fn, al, ball, num_fmt=nm)
             r += 1
 
-    ws1.sheet_format.defaultColWidth = 12       # 열너비 12 기본
+    ws1.sheet_format.defaultColWidth = 13       # 열너비 13 기본
     ws1.sheet_view.zoomScale = 85               # 화면 배율 85%
 
     # ── result2 블록 (result1 시트의 O열부터 작성) ───────────────────────────

@@ -262,8 +262,17 @@ zip OK + XML well-formed + id unique 라도 한글이 거부할 수 있다. 아�
 - **탭 분리(5탭)**: "보고서 출력" 탭 신설(`TAB_REPORT=4`, `_setup_report_tab`). CN값 계산 탭(3)=계산 + **CN값 메모리 관리**(`_setup_memory_list_card`), 보고서 출력 탭(4)=출력 설정·3단계 미리보기/사유·내보내기. 출력 위젯(leOutputDir·내보내기 버튼)을 탭4로 reparent, `_wrap_tab_in_scroll`가 `_recalc_content_layout` 보관.
 - **메모리풀 모델**: CN값 계산 시 `leLayerName`(레이어 이름) 입력 → 그 이름으로 레이어 생성 + `_save_to_memory`로 계산결과 스냅샷을 `self._memory_pool[name]` 저장. 보고서 탭 개발 전/중/후 = `_stage_combos` 드롭다운으로 메모리 선택(`_staged_build_report`가 풀에서 조립). "단계로 저장" 버튼 폐기. `_refresh_recalc_layer_list`는 'cn값' 필드 보유 레이어로 필터(사용자 명명 포함).
 - **표4-19 페이지/병합/포맷**: ①단계별 섹터 분리 + 행수예산(`RES_ROWS_PER_TABLE=28`) 초과 시 소유역 경계 물리 분할(`_plan_table_groups`/`_render_split_res`, 표 포함 `<hp:p>` 복제 + `pageBreak='1'` + repeatHeader, 복제표 누름틀 id 재배정). ②단계(col0)/소유역(col1) **진짜 cellSpan rowSpan 세로 병합**(`_merge_res_columns`). ③단계 컬럼 **세로쓰기**(`textDirection="VERTICAL"`). ④숫자 **정수+천단위 콤마**(`_fmt_num`=엑셀 `#,##0`, 표4-19만; 표4-17 증감은 소수 유지). ⑤캡션 **표 번호 제거**("[표 4-19]"→"[표]", autoNum 필드 제거, `_strip_table_numbers`).
-- **Excel**: 3단계는 **단일 파일·단계별 시트**(`export_excel_staged`, `export_results`에 `wb`/`sheet_title` 옵션, `_ares_to_results` 추출). **열너비 12·배율 85%**(`defaultColWidth=12`, `zoomScale=85`). HWP 템플릿 입력 UI 제거(항상 내장 `cn_report.hwpx`).
+- **Excel**: 3단계는 **단일 파일·단계별 시트**(`export_excel_staged`, `export_results`에 `wb`/`sheet_title` 옵션, `_ares_to_results` 추출). **열너비 13·배율 85%**(`defaultColWidth=13`, `zoomScale=85`). HWP 템플릿 입력 UI 제거(항상 내장 `cn_report.hwpx`).
 - 골든 `scripts/test_hwpx_writer.py`(`test_merge`/`test_staged_split`)·`scripts/test_staged_dialog.py` + 원본대조 게이트 통과. **한글/엑셀 육안 게이트**(세로쓰기·캡션·손상경고·시트·서식) 필수.
+
+## 최근 주요 변경 (2026-06-05 추가) — 유역합성·표 선스타일·UI 버그픽스
+
+- **유역합성(composite) 출력 누락 수정 — 원인 3겹**: ①`_save_to_memory`가 합성 결과를 스냅샷에 안 담음(`calculate_grouped_results` + `build_analysis_result(grouped_result1/2)` 추가) → 3단계 Excel 누락 해소. ②`render_hwpx`/`render_staged_report`가 `composite_detail`을 아예 렌더 안 함(템플릿에 유역합성 전용 표 없음) → **표4-19(res.*)에 단계별로 합성 블록을 detail 뒤에 이어붙임**. ③3단계는 스냅샷만 사용 → **CN계산 *후* 그룹 정의 시 조용히 누락** → 내보내기 시점 스냅샷 레이어 + 현재 그룹으로 재계산 주입(`_refresh_composite_from_groups`, 단일단계 경로와 대칭). 레이어 부재/그룹 없음 시 graceful.
+- **표 선스타일(행간 이중선) 수정**: 템플릿 프로토타입 1행은 헤더 바로 아래라 윗변이 이중선(`DOUBLE_SLIM`)인데, 이를 모든 데이터행에 복제하면 **행마다 이중선**이 그려져 원본과 달라짐. → **첫 데이터행만 이중선(헤더 구분) 유지, 2행부터 동일 좌/우/아래·동일 배경의 실선(`SOLID`)으로 교체**(`_Doc.border_solid_map` = header.xml borderFill 이중선→실선 매핑(좌·우·아래·fill 동일 보장), `_fix_row_separators`를 `_render_dynamic_table` 끝에서 호출 — 표4-17·표4-19 공통). 셀 배경(fill)까지 키에 포함해 음영 변형 방지.
+- **Excel '합계' 라벨**: `export_results` 합계 행의 토지이용 칸이 비어 있던 것을 `'합계'`로 기입(개별 소유역 + 유역합성 블록 모두). 한글 렌더러(`_res_summary_row`)와 일치.
+- **CN 계산 버튼 UI 씹힘(위젯 겹침) 수정**: `progressBarCalc`에 `RetainSizeWhenHidden(True)`(숨김 시에도 20px 자리 유지 → 계산 중 표시될 때 레이아웃 reflow 제거) + 계산 시작/종료 시 카드 강제 `repaint()/update()`(`processEvents` 반복 시 스테일 픽셀 잔상 정리).
+- **출력 파일명 통일**: 단일·3단계 모두 `result.xlsx` / `result.hwpx`(주의: 같은 폴더에 동일 파일명 → 단일/3단계 둘 다 돌리면 덮어씀). **체크박스 라벨** '개발 전/중/후 3단계 비교…' → **'비교 검토 기능'**.
+- 어드버서리얼 리뷰(4 에이전트)·골든 8종·py_compile 통과. `export_result1`/`export_result2`는 미사용 레거시(미수정).
 
 ## 최근 주요 변경 (2026-06-04~05)
 
