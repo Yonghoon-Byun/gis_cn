@@ -41,6 +41,46 @@ def _hh(root):
     return ns, (lambda t: f"{{{ns}}}{t}")
 
 
+def _copy_table_styles(table_p, dst_header, dst_hh, src_header, src_hh) -> int:
+    """table_p 가 참조하는 borderFill/charPr/paraPr 정의를 src_header → dst_header 로
+    새(fresh) id 로 복사하고 table_p 의 참조를 갱신한다.
+
+    같은 ID라도 문서마다 정의가 다르므로(이식 시 테두리 NONE 등 깨짐), 원본 정의를
+    충실히 가져와 충돌 없는 새 ID로 매핑한다. 반환: 복사한 정의 수.
+    """
+    copied = 0
+    specs = [("borderFillIDRef", "borderFill"), ("charPrIDRef", "charPr"), ("paraPrIDRef", "paraPr")]
+    for ref_attr, tag in specs:
+        used = {el.get(ref_attr) for el in table_p.iter() if el.get(ref_attr)}
+        if not used:
+            continue
+        dst_first = next((e for e in dst_header.iter(dst_hh(tag))), None)
+        if dst_first is None:
+            continue
+        container = dst_first.getparent()
+        ids = [int(e.get("id")) for e in container.findall(dst_hh(tag)) if (e.get("id") or "").isdigit()]
+        next_id = (max(ids) + 1) if ids else 0
+        src_defs = {e.get("id"): e for e in src_header.iter(src_hh(tag))}
+        mapping = {}
+        for oid in sorted(used, key=lambda x: int(x) if (x or "").isdigit() else -1):
+            sdef = src_defs.get(oid)
+            if sdef is None:
+                continue
+            new = deepcopy(sdef)
+            new.set("id", str(next_id))
+            container.append(new)
+            mapping[oid] = str(next_id)
+            next_id += 1
+            copied += 1
+        if container.get("itemCnt") is not None:
+            container.set("itemCnt", str(len(container.findall(dst_hh(tag)))))
+        for el in table_p.iter():
+            v = el.get(ref_attr)
+            if v in mapping:
+                el.set(ref_attr, mapping[v])
+    return copied
+
+
 def add_standard_ref_table(section_root, raw, hp) -> dict:
     """표 4-18 국가표준 CN 기준표(8열, 정적)를 샘플에서 템플릿으로 이식.
 
@@ -63,31 +103,23 @@ def add_standard_ref_table(section_root, raw, hp) -> dict:
         if "AMC-II" in "".join(x.text or "" for x in
                               (t.find(shp("caption")) if t.find(shp("caption")) is not None else t).iter(shp("t")))
         and t.get("colCnt") == "8")
-    ref_p = ref_tbl.getparent().getparent()      # tbl -> run -> p
     info["ref_rows"] = len(ref_tbl.findall(shp("tr")))
+    ref_copy = deepcopy(ref_tbl.getparent().getparent())     # tbl -> run -> p
 
-    # header.xml: charPr 14,15 복사 (참조 폰트/테두리는 기존재 — 사전 실측 확인)
-    hdr = etree.fromstring(raw[HEADER], etree.XMLParser(huge_tree=True))
-    _, hh = _hh(hdr)
-    char_container = next(cp for cp in hdr.iter(hh("charPr"))).getparent()
-    existing = {cp.get("id") for cp in char_container.findall(hh("charPr"))}
+    # 스타일 충실 이식: 표가 쓰는 borderFill/charPr/paraPr 정의를 샘플 header 에서
+    # 템플릿 header 로 fresh id 복사 + 참조 remap (ID 충돌 → 테두리 NONE 방지)
     smp_hdr = etree.fromstring(zipfile.ZipFile(SAMPLE).read(HEADER), etree.XMLParser(huge_tree=True))
     _, shh = _hh(smp_hdr)
-    for cid in ("14", "15"):
-        if cid in existing:
-            continue
-        src = next(cp for cp in smp_hdr.iter(shh("charPr")) if cp.get("id") == cid)
-        char_container.append(deepcopy(src))
-        info["charpr_added"] += 1
-    if char_container.get("itemCnt") is not None:
-        char_container.set("itemCnt", str(len(char_container.findall(hh("charPr")))))
-    raw[HEADER] = etree.tostring(hdr, xml_declaration=True, encoding="UTF-8", standalone=True)
+    dst_hdr = etree.fromstring(raw[HEADER], etree.XMLParser(huge_tree=True))
+    _, hh = _hh(dst_hdr)
+    info["styles_copied"] = _copy_table_styles(ref_copy, dst_hdr, hh, smp_hdr, shh)
+    raw[HEADER] = etree.tostring(dst_hdr, xml_declaration=True, encoding="UTF-8", standalone=True)
 
     # 기준표 단락을 res 표 단락 앞에 삽입 (보고서 순서: 표4-18 → 표4-19)
     res_tbl = next(t for t in section_root.iter(hp("tbl"))
                    if any((fb.get("name") or "").startswith(RES_PREFIX + ".")
                           for fb in t.iter(hp("fieldBegin"))))
-    res_tbl.getparent().getparent().addprevious(deepcopy(ref_p))
+    res_tbl.getparent().getparent().addprevious(ref_copy)
     return info
 
 
@@ -160,6 +192,15 @@ def add_delta_table(section_root, raw, hp) -> dict:
                    and "유출곡선지수" in full(t.find(shp("caption")))
                    and "변화" in full(t.find(shp("caption"))))
     new_p = deepcopy(src_tbl.getparent().getparent())   # tbl -> run -> p
+
+    # 스타일 충실 이식 (borderFill/charPr/paraPr 정의 복사 + 참조 remap) — 필드주입 전
+    smp_hdr = etree.fromstring(zipfile.ZipFile(SAMPLE).read(HEADER), etree.XMLParser(huge_tree=True))
+    _, shh = _hh(smp_hdr)
+    dst_hdr = etree.fromstring(raw[HEADER], etree.XMLParser(huge_tree=True))
+    _, hh = _hh(dst_hdr)
+    info["styles_copied"] = _copy_table_styles(new_p, dst_hdr, hh, smp_hdr, shh)
+    raw[HEADER] = etree.tostring(dst_hdr, xml_declaration=True, encoding="UTF-8", standalone=True)
+
     next(section_root.iter(hp("tbl"))).getparent().getparent().addprevious(new_p)
 
     new_tbl = next(new_p.iter(hp("tbl")))
@@ -183,6 +224,73 @@ def add_delta_table(section_root, raw, hp) -> dict:
             ca.set("rowAddr", str(pos))
     new_tbl.set("rowCnt", str(len(all_rows)))
     return info
+
+
+def relocate_secpr(root, hp) -> bool:
+    """secPr(쪽 설정·여백)를 섹션 첫 단락의 '전용 run'으로 분리·이동하되,
+    colPr(단 설정) 컨트롤을 secPr 와 같은 run 에 반드시 동반시킨다.
+
+    한글은 섹션정의 run 을 [secPr, ctrl(colPr)] 형태로 기대한다. secPr 만 든 run 은
+    '불완전한 섹션 헤더'로 보고 섹션 속성(여백 포함)을 통째로 폐기 → 기본 여백으로
+    폴백한다(원본/f2b 정상 구조 = secPr 전용 run[secPr,ctrl(colPr)] + 표는 다음 run).
+    표 이식 과정에서 colPr 가 다른 run 으로 고아가 되거나 secPr 가 표 run 에 끼이는
+    문제를 모두 바로잡는다. 이미 올바르면 무변경(False).
+    """
+    secpr = next(root.iter(hp("secPr")), None)
+    if secpr is None:
+        return False
+    sec_run = secpr.getparent()                    # secPr 의 직접 부모 <hp:run>
+    if sec_run is None or sec_run.tag != hp("run"):
+        return False
+    first_p = next((p for p in root if p.tag == hp("p")), None)
+    if first_p is None:
+        return False
+
+    def has_colpr(run):
+        return any(c.tag == hp("ctrl") and c.find(hp("colPr")) is not None
+                   for c in run)
+
+    # 이미 올바른 구조(첫 단락 첫 run = [secPr, ctrl(colPr)]·표/글자 없음)면 그대로 둠
+    first_run = first_p.find(hp("run"))
+    already_ok = (
+        sec_run is first_run
+        and len(first_p) and first_p[0] is sec_run
+        and sec_run.find(hp("tbl")) is None
+        and sec_run.find(hp("t")) is None
+        and has_colpr(sec_run)
+    )
+    if already_ok:
+        return False
+
+    # secPr 전용 run 생성(charPrIDRef 보존)
+    new_run = etree.Element(hp("run"))
+    cpr = sec_run.get("charPrIDRef") or (
+        first_run.get("charPrIDRef") if first_run is not None else None)
+    if cpr is not None:
+        new_run.set("charPrIDRef", cpr)
+    sec_run.remove(secpr)
+    new_run.append(secpr)
+
+    # colPr(단 설정) 컨트롤을 secPr 뒤에 합성 — 한글 섹션정의 인식 필수 조건.
+    # ※ 기존 colPr(다른 단락)를 '이동/삭제'하면 그 단락의 <linesegarray> 가 run 수와
+    #    어긋나 한글이 '문서 손상/변조'로 판정한다(검증 완료). 그래서 다른 단락은 절대
+    #    건드리지 않고, 표준 단일 단 colPr 을 새로 만들어 [secPr, ctrl(colPr)] 형태
+    #    (원본 첫 단락과 동일)를 갖춘다. 결과적으로 colPr 가 2개가 되지만 각자 자기
+    #    단락의 단 설정으로 유효하며(둘 다 단일 단), 한글이 정상 인식한다.
+    ctrl = etree.SubElement(new_run, hp("ctrl"))
+    etree.SubElement(ctrl, hp("colPr"), {
+        "id": "", "type": "NEWSPAPER", "layout": "LEFT",
+        "colCount": "1", "sameSz": "1", "sameGap": "0"})
+
+    first_p.insert(0, new_run)                  # 첫 단락 맨 앞
+
+    # secPr 를 빼낸 원래 run 이 비면 제거
+    if (sec_run is not new_run and len(sec_run) == 0
+            and not (sec_run.text or "").strip()):
+        owner = sec_run.getparent()
+        if owner is not None:
+            owner.remove(sec_run)
+    return True
 
 
 def clean_template(src: Path, out: Path) -> dict:
@@ -246,20 +354,8 @@ def clean_template(src: Path, out: Path) -> dict:
             _inject_field(c0, bp, ep, "res.stage", hp)
             stats["res_stage_field"] = True
 
-    # 3.6) 깨진 ref.* 누름틀(표 밖 본문 잔존) 제거 — 기준표는 정적 표4-18로 대체됨
-    removed = 0
-    for fb in list(root.iter(hp("fieldBegin"))):
-        if not (fb.get("name") or "").startswith("ref."):
-            continue
-        ctrl_b = fb.getparent()
-        run = ctrl_b.getparent()
-        for ctrl in list(run.findall(hp("ctrl"))):
-            fe = ctrl.find(hp("fieldEnd"))
-            if fe is not None and fe.get("beginIDRef") == fb.get("id"):
-                run.remove(ctrl)
-        run.remove(ctrl_b)
-        removed += 1
-    stats["orphan_ref_removed"] = removed
+    # (깨진 ref.* 본문 누름틀은 results_staged에서 무해 입증되어 보존 — 제거 시
+    #  다른 run의 fieldEnd 누락으로 고아 발생 → 한글 변조 감지. 표4-18 정적표가 별도로 존재.)
 
     # 4) 원본 여백
     for mg in root.iter(hp("margin")):
@@ -275,6 +371,9 @@ def clean_template(src: Path, out: Path) -> dict:
     delta_info = add_delta_table(root, raw, hp)
     stats["delta_fields"] = delta_info.get("delta_fields", 0)
     stats["delta_skipped"] = delta_info.get("skipped", False)
+
+    # 4.7) secPr(쪽 여백)를 첫 단락으로 이동 — 이식한 표들이 여백 적용받도록
+    stats["secpr_moved"] = relocate_secpr(root, hp)
 
     # 5) 검증 — 모든 표 rowAddr 범위·연속, 그리드 타일링
     _validate(root, hp)
@@ -318,8 +417,18 @@ def _validate(root, hp) -> None:
             miss = [(r, c) for r in range(rc) for c in range(cc) if (r, c) not in grid]
             if miss:
                 problems.append(f"표{ti} 그리드 미충족 {len(miss)}칸 예{miss[:3]}")
+    # fieldBegin/fieldEnd 짝 무결성 (고아 fieldEnd → 한글 '손상/변조' 감지)
+    begins = {}
+    for fb in root.iter(hp("fieldBegin")):
+        begins[fb.get("id")] = begins.get(fb.get("id"), 0) + 1
+    for fid, c in begins.items():
+        if c > 1:
+            problems.append(f"fieldBegin id 중복: {fid} x{c}")
+    for fe in root.iter(hp("fieldEnd")):
+        if fe.get("beginIDRef") not in begins:
+            problems.append(f"고아 fieldEnd: beginIDRef={fe.get('beginIDRef')}")
     if problems:
-        raise RuntimeError("검증 실패(한글 크래시 위험): " + "; ".join(problems[:8]))
+        raise RuntimeError("검증 실패(한글 크래시/변조 위험): " + "; ".join(problems[:8]))
 
 
 def main() -> int:
@@ -332,7 +441,7 @@ def main() -> int:
     if stats.get("skipped"):
         print("  표4-18 기준표: 이미 존재(건너뜀)")
     else:
-        print(f"  표4-18 기준표 이식: {stats.get('ref_rows', 0)}행, charPr +{stats.get('charpr_added', 0)}")
+        print(f"  표4-18 기준표 이식: {stats.get('ref_rows', 0)}행, 스타일 정의 +{stats.get('styles_copied', 0)}")
     if stats.get("delta_skipped"):
         print("  표4-17 비교표: 이미 존재(건너뜀)")
     else:

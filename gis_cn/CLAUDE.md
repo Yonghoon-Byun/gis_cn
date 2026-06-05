@@ -201,7 +201,8 @@ Tab 0 `rbSourceDB`/`rbSourceLocal` 라디오로 데이터 소스 전환. `CnWork
 
 - 토지피복도 커스텀 분류 (L1/L2/L3 혼합 분류 — A안 확정, 미구현)
 - 삽도(지도 이미지) 자동 생성
-- 한글(.hwp) 템플릿 실제 파일(`templates/v1.0/cn_report.hwp`) — 스펙 문서만 제공됨
+- **개발 전/중/후 3단계 dialog UI**: 데이터모델(`StagedReport`)·렌더러(`render_staged_report`)는 완성, dialog 는 아직 단일단계 `render_hwpx`만 호출. 단계 선택·누적 UI, 단계별 SHP 입력, 적정성 사유 입력, meta 표지 누름틀 미구현.
+- 표4-19 단계 컬럼 rowSpan 병합(현재 행마다 표시 — 미관용 선택)
 
 ## HWP/Excel 공통 입력 모델
 
@@ -214,6 +215,44 @@ Tab 0 `rbSourceDB`/`rbSourceLocal` 라디오로 데이터 소스 전환. `CnWork
 - `templates/v1.0/README.md` — HWP 템플릿 제작 스펙(누름틀/책갈피/셀필드 ID)
 
 UI는 결과 저장 버튼 위에 "출력 포맷" 체크박스 + HWP 템플릿 경로를 추가(`_setup_output_format_row()`). Excel/HWP 동시 선택 시 순차 실행하며, HWP 실패해도 Excel은 보존(부분 실패 허용).
+
+## 한글(.hwpx) 보고서 출력 — 순수 Python 렌더러 (한컴오피스 불필요)
+
+`core/hwp_renderer.py`(pyhwpx/OLE)는 **레거시**다(한컴오피스 필요·COM 불안정). 현재 출력 경로는
+**`core/hwpx_writer.py`** — lxml 만으로 HWPX(OWPML zip+XML)를 직접 작성한다. `dialog.py` 는
+`hwpx_writer.render_hwpx` 를 호출(.hwp → .hwpx).
+
+- `core/hwpx_writer.py::render_hwpx(result, template, out)` — 단일단계.
+- `core/hwpx_writer.py::render_staged_report(report, template, out)` — **개발 전/중/후 3단계**(표4-17 증감 비교 + 표4-19 단계 컬럼).
+- 동적 표: 프로토타입 행을 결과 수만큼 복제 + `rowAddr` 재번호(`_render_dynamic_table`). 사전할당-trim 방식 폐기.
+- `scripts/build_template.py` — 샘플 hwpx → 클린 템플릿(`templates/v1.0/cn_report.hwpx`, 표4-17/18/19 3개) 빌더. 쓰레기 표 제거·res 축소·표 이식·15mm 여백·secPr 보정·검증.
+- 데이터모델: `StagedReport{stages, stage_order, cn_delta_rows}`, `CnDeltaRow`(표4-17 소유역별 전/중/후 CN+증감+사유). 계산엔진과 **직교**(옵션 C) — `result_calculator.assemble_staged_report()`/`build_cn_delta()`.
+
+### 한글 HWPX 렌더링 핵심 함정 (반드시 준수 — "구조 정합 ≠ 한글 렌더 성공")
+
+zip OK + XML well-formed + id unique 라도 한글이 거부할 수 있다. 아래 불변식을 지켜야 한다:
+
+1. **secPr-run = `[secPr, ctrl(colPr)]`**: 섹션정의 run 은 secPr 뒤에 colPr(단 설정) 컨트롤을 동반해야 한다. secPr 만 든 run, 또는 표(tbl)와 같은 run 에 secPr 가 끼이면 → 한글이 섹션정의를 폐기하고 **전 페이지가 기본 여백**(위20/머리15/왼30/오30/꼬리15/아래15)으로 떨어진다. (XML 의 margin 값은 정상이어도 한글이 안 읽음.)
+2. **linesegarray 불변식**: `<hp:linesegarray>`(라인 세그먼트 맵)가 있는 단락에서 `<hp:run>`을 **삭제·이동하면** 라인맵이 없는 run 을 참조해 한글이 **"문서가 손상되었거나 변조" 경고**를 띄운다. → 다른 단락의 요소(colPr 등)를 옮기지 말고 **그 자리에 새로 합성(synthesize)** 하라. (`relocate_secpr` 가 colPr 를 이동→삭제하지 않고 표준 단일 단 colPr 를 새로 만드는 이유.)
+3. **fieldBegin/fieldEnd 짝**: 고아 fieldEnd(짝 없는 beginIDRef) → 동일한 "손상/변조" 경고. 누름틀 제거 시 begin/end 쌍을 반드시 함께. `build_template._validate()` 가 짝·id중복을 검사.
+4. **borderFill ID 해석**: 표 이식 시 `borderFillIDRef` 는 ID 가 아니라 **정의로 해석**된다(같은 ID 라도 문서마다 정의가 다름). 원본 정의를 fresh ID 로 복사 + remap 해야 테두리가 유지(`_copy_table_styles`). 안 하면 테두리가 NONE→빨간 점선.
+5. **mimetype**: zip **첫 엔트리** + **STORED(비압축)**. 쪽 여백 단위 HWPUNIT=1/7200inch (15mm=4252, 12.5mm=3543).
+
+### 검증 도구 (한글 없이 회귀 차단)
+
+- **`scripts/compare_to_original.py [출력.hwpx]`** — 원본 hwpx(`제4장 재해영향…최종.hwpx`)와 쪽여백·secPr 배치(colPr 동반 여부)·표 테두리 스타일을 **정량 비교**하는 회귀 게이트. secPr-run 에 colPr 없거나 표가 섞이면 ★불일치★.
+- `scripts/test_hwpx_writer.py` — 골든 구조 테스트(필드·행수·id유니크·그리드 타일링). 한글/QGIS 불필요.
+- `scripts/diag_integrity.py` / `diag_para_diff.py` — 손상/변조 원인(필드 짝·run 구조) 진단, 두 hwpx 단락별 diff.
+- `scripts/render_sample.py [출력]` — 한글 육안 검증용 3단계 샘플 렌더.
+- **시각/열림 확인은 자동화 불가** — 한글에서 직접 열어보는 사용자 육안 게이트 필수(개발 PC COM 은 -2147221005 로 실패).
+
+## 최근 주요 변경 (2026-06-04~05)
+
+- **한글 출력을 순수 Python(lxml) 렌더러로 전환** — 한컴오피스 불필요(`hwpx_writer.py`). `dialog.py` → `render_hwpx` 연결, UI `.hwp`→`.hwpx`.
+- 개발 전/중/후 **3단계 비교 파이프라인**(옵션 C): `StagedReport`/`CnDeltaRow` 데이터모델 + `assemble_staged_report`/`build_cn_delta` + `render_staged_report`(표4-17 증감 비교, 표4-19 단계 컬럼).
+- 동적 표(결과 수만큼 행 생성), 표4-18 국가표준 CN 기준표(8열) 이식, 15mm 쪽 여백.
+- **한글 렌더 버그 3종 해결**: ① 테두리 NONE/빨간점선 → borderFill 정의 이식(`_copy_table_styles`) ② 쪽 여백 무시 → secPr-run 에 colPr 동반 ③ 손상/변조 경고 → linesegarray 가 있는 단락의 run 삭제 금지(colPr 합성). 위 "핵심 함정" 참조.
+- 회귀 게이트 `scripts/compare_to_original.py`(원본 대조) + 진단 스크립트 추가.
 
 ## 최근 주요 변경 (2026-04-22)
 
