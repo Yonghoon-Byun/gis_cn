@@ -382,9 +382,10 @@ def export_result2(result2_data: list, path: str):
 # 통합 내보내기 (result1 + result2 → 단일 xlsx 파일, 2개 시트)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def export_results(result1_data: list, result2_data: list, path: str,
-                   *, grouped_result1: list = None, grouped_result2: list = None):
-    """results.xlsx: result1 시트 + result2 시트를 하나의 파일에 저장."""
+def export_results(result1_data: list, result2_data: list, path: str = None,
+                   *, grouped_result1: list = None, grouped_result2: list = None,
+                   wb=None, sheet_title: str = 'result1'):
+    """result1 시트(+result2 블록). wb 를 주면 그 워크북에 시트로 추가(저장 안 함)하고 wb 반환."""
     try:
         from openpyxl import Workbook
     except ImportError:
@@ -395,11 +396,15 @@ def export_results(result1_data: list, result2_data: list, path: str,
     ball, bltb, btb, brtb = s['b_all'], s['b_ltb'], s['b_tb'], s['b_rtb']
     fpink, fcyan, fsilver = s['fill_pink'], s['fill_cyan'], s['fill_silver']
 
-    wb = Workbook()
-
-    # ── Sheet: result1 ────────────────────────────────────────────────────────
-    ws1 = wb.active
-    ws1.title = 'result1'
+    # ── Sheet: result1 (wb 주면 시트 추가, 아니면 새 워크북) ──────────────────
+    if wb is None:
+        wb = Workbook()
+        ws1 = wb.active
+        ws1.title = sheet_title
+        _own_wb = True
+    else:
+        ws1 = wb.create_sheet(sheet_title)
+        _own_wb = False
 
     r = 1
     _sc(ws1.cell(r, 1), '소유역명', fn, al, ball, num_fmt=nm)
@@ -500,8 +505,8 @@ def export_results(result1_data: list, result2_data: list, path: str,
                 _sc(ws1.cell(r, c), None, fn, al, ball, num_fmt=nm)
             r += 1
 
-    ws1.column_dimensions['L'].width = 9.375
-    ws1.column_dimensions['N'].width = 11.625
+    ws1.sheet_format.defaultColWidth = 12       # 열너비 12 기본
+    ws1.sheet_view.zoomScale = 85               # 화면 배율 85%
 
     # ── result2 블록 (result1 시트의 O열부터 작성) ───────────────────────────
     R2_COL = 15  # 'O'
@@ -545,8 +550,10 @@ def export_results(result1_data: list, result2_data: list, path: str,
             _sc(ws1.cell(r2_next, R2_COL+3), row['amc3_cn'],    fn, al, ball, num_fmt=nm)
             r2_next += 1
 
-    wb.save(path)
-    logger.info(f"results.xlsx 저장: {path}")
+    if _own_wb:
+        wb.save(path)
+        logger.info(f"results.xlsx 저장: {path}")
+    return wb
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -717,72 +724,62 @@ def assemble_staged_report(stage_results: "dict[str, AnalysisResult]", *,
     )
 
 
+def _ares_to_results(result: AnalysisResult):
+    """`AnalysisResult` → (result1, result2, grouped_result1, grouped_result2) dict 리스트."""
+    def _blocks(blocks):
+        return [
+            {
+                'watershed': b.name,
+                'rows': [
+                    {
+                        'land_use': r.land_use,
+                        'A_area': r.a_area, 'A_cn': r.a_cn,
+                        'B_area': r.b_area, 'B_cn': r.b_cn,
+                        'C_area': r.c_area, 'C_cn': r.c_cn,
+                        'D_area': r.d_area, 'D_cn': r.d_cn,
+                        'total_area': r.total_area,
+                        'amc2_cn': r.amc2_cn, 'amc3_cn': r.amc3_cn,
+                    }
+                    for r in b.rows
+                ],
+                'total_A': b.total_a, 'total_B': b.total_b,
+                'total_C': b.total_c, 'total_D': b.total_d,
+                'total_area': b.total_area,
+                'amc2_cn': b.amc2_cn, 'amc3_cn': b.amc3_cn,
+            }
+            for b in blocks
+        ]
+
+    def _summaries(rows):
+        return [
+            {'watershed': s.name, 'total_area': s.total_area,
+             'amc2_cn': s.amc2_cn, 'amc3_cn': s.amc3_cn}
+            for s in rows
+        ]
+
+    return (_blocks(result.detail_blocks), _summaries(result.summary_rows),
+            _blocks(result.composite_detail) or None, _summaries(result.composite_summary) or None)
+
+
 def export_excel(result: AnalysisResult, path: str) -> None:
-    """`AnalysisResult` 기반 Excel 저장 (내부적으로 기존 `export_results` 사용).
-
-    HWP 렌더러와 동일한 입력 시그니처를 제공하기 위한 래퍼.
-    """
-    r1 = [
-        {
-            'watershed': b.name,
-            'rows': [
-                {
-                    'land_use': r.land_use,
-                    'A_area': r.a_area, 'A_cn': r.a_cn,
-                    'B_area': r.b_area, 'B_cn': r.b_cn,
-                    'C_area': r.c_area, 'C_cn': r.c_cn,
-                    'D_area': r.d_area, 'D_cn': r.d_cn,
-                    'total_area': r.total_area,
-                    'amc2_cn': r.amc2_cn, 'amc3_cn': r.amc3_cn,
-                }
-                for r in b.rows
-            ],
-            'total_A': b.total_a, 'total_B': b.total_b,
-            'total_C': b.total_c, 'total_D': b.total_d,
-            'total_area': b.total_area,
-            'amc2_cn': b.amc2_cn, 'amc3_cn': b.amc3_cn,
-        }
-        for b in result.detail_blocks
-    ]
-    r2 = [
-        {
-            'watershed': s.name,
-            'total_area': s.total_area,
-            'amc2_cn': s.amc2_cn,
-            'amc3_cn': s.amc3_cn,
-        }
-        for s in result.summary_rows
-    ]
-    gr1 = [  # composite
-        {
-            'watershed': b.name,
-            'rows': [
-                {
-                    'land_use': r.land_use,
-                    'A_area': r.a_area, 'A_cn': r.a_cn,
-                    'B_area': r.b_area, 'B_cn': r.b_cn,
-                    'C_area': r.c_area, 'C_cn': r.c_cn,
-                    'D_area': r.d_area, 'D_cn': r.d_cn,
-                    'total_area': r.total_area,
-                    'amc2_cn': r.amc2_cn, 'amc3_cn': r.amc3_cn,
-                }
-                for r in b.rows
-            ],
-            'total_A': b.total_a, 'total_B': b.total_b,
-            'total_C': b.total_c, 'total_D': b.total_d,
-            'total_area': b.total_area,
-            'amc2_cn': b.amc2_cn, 'amc3_cn': b.amc3_cn,
-        }
-        for b in result.composite_detail
-    ] or None
-    gr2 = [
-        {
-            'watershed': s.name,
-            'total_area': s.total_area,
-            'amc2_cn': s.amc2_cn,
-            'amc3_cn': s.amc3_cn,
-        }
-        for s in result.composite_summary
-    ] or None
-
+    """`AnalysisResult` 기반 Excel 저장 (HWP 렌더러와 동일 시그니처 래퍼)."""
+    r1, r2, gr1, gr2 = _ares_to_results(result)
     export_results(r1, r2, path, grouped_result1=gr1, grouped_result2=gr2)
+
+
+def export_excel_staged(stage_results, path: str) -> None:
+    """단계별 (stage_name, AnalysisResult) 시퀀스를 하나의 워크북에 시트별로 저장(개발 전/중/후).
+
+    각 단계가 한 시트(result1 + result2 블록). 단일 파일·시트 분리.
+    """
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.remove(wb.active)
+    for stage, ares in stage_results:
+        r1, r2, gr1, gr2 = _ares_to_results(ares)
+        export_results(r1, r2, wb=wb, sheet_title=str(stage)[:31],
+                       grouped_result1=gr1, grouped_result2=gr2)
+    if not wb.worksheets:
+        wb.create_sheet("결과")
+    wb.save(path)
+    logger.info(f"단계별 results.xlsx 저장: {path} ({len(wb.worksheets)}시트)")

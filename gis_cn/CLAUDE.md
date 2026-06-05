@@ -75,6 +75,15 @@ Tab 3 CN값 계산       → ⑤ _build_result_layer → ⑥ 매핑 적용 → �
 - 매칭 실패 시 `cn값` = NULL, 실패 목록은 로그창에 출력
 - **CN 계산 시 CN표 우선순위**: Tab 2(CN값 편집) 위젯 테이블 → 비어있으면 `cn_value.xlsx` 폴백
 
+> **⚠ CN표 출처 차이 (정합성 주의, 2026-06-05 확인):** 실제 CN 매칭에 쓰는 기본 폴백표
+> `cn_value.xlsx`(13종 단일계층)는 보고서 표4-18에 인쇄되는 국가표준 **[표 4-2] 유출곡선지수
+> (AMC-Ⅱ)**(`data/cn_reference_std.json`, 41행 대/중/세분류)와 **분류체계·일부 값이 다르다.**
+> 예: `밭` 63/**75/83/87** vs 표4-2 63/74/82/85; `임야` 45/66/77/83(표4-2 산림 55/72/82/85≠);
+> `초지` 39/61/74/80(표4-2 자연초지 30/58/71/78≠); `광장·주차장` 98 등은 표4-2에 없는 분류.
+> **현 방침: `cn_value.xlsx` 값 보존**(기존 CN산정 V5 검증값일 수 있음) — 국가표준으로 재정합하려면
+> 모든 산정 CN이 바뀌므로 별도 결정 필요. 보고서 표4-18은 국가표준(`cn_reference_std.json`)으로
+> 별도 인쇄되며 실제 산정표와 다를 수 있음에 유의.
+
 ## PostGIS 공간 처리 (db_manager.py)
 
 DB에서 Clip+Intersection을 처리 → QGIS Processing 최소화. Geometry는 WKB(바이너리)로 전송.
@@ -87,16 +96,17 @@ DB에서 Clip+Intersection을 처리 → QGIS Processing 최소화. Geometry는 
 
 `native:intersection` 실행 후 동일 컬럼명에 숫자 접두어가 붙을 수 있다 (예: `hydro_type` → `2_hydro_type`). `spatial_ops._get_field_value()`에서 `endswith(f"_{target}")` 패턴으로 탐색하여 처리한다.
 
-## UI 구조 (4탭)
+## UI 구조 (5탭, 2026-06-05 개편)
 
-탭 0·2는 `.ui` 파일에서, 탭 1은 `_setup_mapping_tab()`으로 동적 삽입(`insertTab(1,...)`), 탭 3은 `.ui` 파일의 원래 탭 2(인덱스 이동).
+탭 0·2는 `.ui`, 탭 1은 `_setup_mapping_tab()` 동적 삽입, 탭 3은 `.ui` 원래 탭2(이동), **탭 4(보고서 출력)는 `_setup_report_tab()`이 `addTab`으로 신설**.
 
 | 인덱스 | 탭명 | 위젯명/생성 | 주요 위젯 |
 |--------|------|------------|---------|
 | Tab 0 | 레이어 불러오기 | `tabCnCalc` (.ui) | rbFile/rbLayer, leFilePath, cmbNameField, rbL1/L2/L3, progressBar, txtLog, btnRun, btnClose, btnNextStep0 |
 | Tab 1 | 토지이용 재분류 | `_setup_mapping_tab()` (동적) | tblMapping + 버튼, btnCnRefPopup(CN표 참조 팝업), btnMappingLoadLayer, btnMappingAddRow, btnMappingDeleteRow, btnMappingSave, btnMappingClear, btnNextStep1 |
 | Tab 2 | CN값 편집 | `tabCnEdit` (.ui) | tblCnValues, btnAddRow, btnDeleteRow, btnAddColumn, btnReloadCn(기본값), btnImportCn(불러오기), btnSaveCn(내보내기), btnNextStep2 |
-| Tab 3 | CN값 계산 | `tabRecalc` (.ui, 동적 삽입 후 index 3) | btnApplyCn(CN값 계산 실행, 동적), cmbRecalcLayer, leOutputDir, btnOutputDir, txtRecalcLog, btnExportResult1(결과 내보내기) |
+| Tab 3 | CN값 계산 | `tabRecalc` (.ui) + 동적 | btnApplyCn, **leLayerName(레이어 이름)**, cmbRecalcLayer, txtRecalcLog, **CN값 메모리 관리 카드**(`_save_to_memory`로 이름별 결과 저장, 저장 목록) |
+| Tab 4 | **보고서 출력**(신설) | `_setup_report_tab()` (동적, addTab, `TAB_REPORT=4`) | leOutputDir/btnOutputDir(이동), chkExportExcel/chkExportHwp, chkStaged, **_stage_combos(개발 전/중/후 드롭다운=메모리 선택)**, btnStagedPreview, tblStaged, **btnReportExport(보고서 출력)** (구 btnExportResult1 숨김) |
 
 ### 탭 인덱스 상수 (dialog.py)
 ```python
@@ -196,13 +206,14 @@ Tab 0 `rbSourceDB`/`rbSourceLocal` 라디오로 데이터 소스 전환. `CnWork
 
 - **로컬 데이터 컬럼명 불일치**: 한국 정부 SHP 파일은 DB와 다른 컬럼명 사용. alias 매핑으로 해결 중, 실제 기관 데이터 확보 후 검증 필요.
 - **CN값 계산 검증 필요**: 유역합성 계산값이 정확한지 기존 엑셀(CN산정 V5)과 비교 검증 예정.
+- **CN 매칭표 ≠ 국가표준 표4-2**: 실제 계산용 `cn_value.xlsx`(13종)가 보고서 표4-18 국가표준표(`data/cn_reference_std.json`, 41행)와 분류·일부 값이 다름(밭 B/C/D, 임야, 초지 등). 현재는 `cn_value.xlsx` 값 보존 방침이며 차이만 문서화(위 "CN값 매칭 로직" 경고 박스 참조). 국가표준 재정합은 고영향 변경이라 보류.
 
 ## 미구현 기능
 
 - 토지피복도 커스텀 분류 (L1/L2/L3 혼합 분류 — A안 확정, 미구현)
 - 삽도(지도 이미지) 자동 생성
-- **개발 전/중/후 3단계 dialog UI**: 데이터모델(`StagedReport`)·렌더러(`render_staged_report`)는 완성, dialog 는 아직 단일단계 `render_hwpx`만 호출. 단계 선택·누적 UI, 단계별 SHP 입력, 적정성 사유 입력, meta 표지 누름틀 미구현.
-- 표4-19 단계 컬럼 rowSpan 병합(현재 행마다 표시 — 미관용 선택)
+- ~~개발 전/중/후 3단계 dialog UI~~ → **구현 완료**(2026-06-05, 아래 "최근 주요 변경 (2026-06-05)" 참조). 잔여 미구현: 단계별 SHP 자동입력 UI, meta 표지 누름틀.
+- 표4-19 **자동 페이지 분할 + 단계/소유역 진짜 셀병합 + 정수포맷 구현 완료**(2026-06-05): ①단계별 섹터 분리 + 행수 예산(`RES_ROWS_PER_TABLE=28`) 초과 시 소유역 블록 경계 물리 분할(`_plan_table_groups`는 단계 바뀌면 새 표, `_render_split_res`는 표 포함 `<hp:p>` 복제 + `pageBreak='1'` + repeatHeader). ②단계(col0)/소유역(col1) **진짜 cellSpan rowSpan 세로 병합**(`_merge_res_columns`: 구간 첫 행 rowSpan=k + 나머지 행 해당 tc 제거, 표분할이 단계/소유역 경계라 한 표 안에서 병합 완결). ③숫자 **정수+천단위 콤마**(`_fmt_num`, 엑셀 `#,##0` 일치 — 표4-19만, 표4-17 증감은 소수 유지). 골든 `test_merge`/`test_staged_split` GREEN, 원본 대조 통과. 한글 육안 게이트 필요.
 
 ## HWP/Excel 공통 입력 모델
 
@@ -245,6 +256,14 @@ zip OK + XML well-formed + id unique 라도 한글이 거부할 수 있다. 아�
 - `scripts/diag_integrity.py` / `diag_para_diff.py` — 손상/변조 원인(필드 짝·run 구조) 진단, 두 hwpx 단락별 diff.
 - `scripts/render_sample.py [출력]` — 한글 육안 검증용 3단계 샘플 렌더.
 - **시각/열림 확인은 자동화 불가** — 한글에서 직접 열어보는 사용자 육안 게이트 필수(개발 PC COM 은 -2147221005 로 실패).
+
+## 최근 주요 변경 (2026-06-05) — 3단계 보고서/탭 대규모 개편
+
+- **탭 분리(5탭)**: "보고서 출력" 탭 신설(`TAB_REPORT=4`, `_setup_report_tab`). CN값 계산 탭(3)=계산 + **CN값 메모리 관리**(`_setup_memory_list_card`), 보고서 출력 탭(4)=출력 설정·3단계 미리보기/사유·내보내기. 출력 위젯(leOutputDir·내보내기 버튼)을 탭4로 reparent, `_wrap_tab_in_scroll`가 `_recalc_content_layout` 보관.
+- **메모리풀 모델**: CN값 계산 시 `leLayerName`(레이어 이름) 입력 → 그 이름으로 레이어 생성 + `_save_to_memory`로 계산결과 스냅샷을 `self._memory_pool[name]` 저장. 보고서 탭 개발 전/중/후 = `_stage_combos` 드롭다운으로 메모리 선택(`_staged_build_report`가 풀에서 조립). "단계로 저장" 버튼 폐기. `_refresh_recalc_layer_list`는 'cn값' 필드 보유 레이어로 필터(사용자 명명 포함).
+- **표4-19 페이지/병합/포맷**: ①단계별 섹터 분리 + 행수예산(`RES_ROWS_PER_TABLE=28`) 초과 시 소유역 경계 물리 분할(`_plan_table_groups`/`_render_split_res`, 표 포함 `<hp:p>` 복제 + `pageBreak='1'` + repeatHeader, 복제표 누름틀 id 재배정). ②단계(col0)/소유역(col1) **진짜 cellSpan rowSpan 세로 병합**(`_merge_res_columns`). ③단계 컬럼 **세로쓰기**(`textDirection="VERTICAL"`). ④숫자 **정수+천단위 콤마**(`_fmt_num`=엑셀 `#,##0`, 표4-19만; 표4-17 증감은 소수 유지). ⑤캡션 **표 번호 제거**("[표 4-19]"→"[표]", autoNum 필드 제거, `_strip_table_numbers`).
+- **Excel**: 3단계는 **단일 파일·단계별 시트**(`export_excel_staged`, `export_results`에 `wb`/`sheet_title` 옵션, `_ares_to_results` 추출). **열너비 12·배율 85%**(`defaultColWidth=12`, `zoomScale=85`). HWP 템플릿 입력 UI 제거(항상 내장 `cn_report.hwpx`).
+- 골든 `scripts/test_hwpx_writer.py`(`test_merge`/`test_staged_split`)·`scripts/test_staged_dialog.py` + 원본대조 게이트 통과. **한글/엑셀 육안 게이트**(세로쓰기·캡션·손상경고·시트·서식) 필수.
 
 ## 최근 주요 변경 (2026-06-04~05)
 

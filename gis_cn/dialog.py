@@ -29,9 +29,11 @@ from .core.spatial_ops import (
 from .core.cn_matcher import load_cn_table, apply_cn_to_layer, XLSX_PATH
 from .core.result_calculator import (
     calculate_results, calculate_grouped_results, export_results,
-    build_analysis_result,
+    build_analysis_result, assemble_staged_report, export_excel, export_excel_staged,
 )
-from .core.analysis_result import ProjectMeta
+from .core.analysis_result import (
+    ProjectMeta, STAGE_PRE, STAGE_DURING, STAGE_POST, DEFAULT_STAGE_ORDER,
+)
 from .core.watershed_group import load_groups, save_groups
 
 PLUGIN_DIR = os.path.dirname(__file__)
@@ -47,6 +49,7 @@ TAB_CALC    = 0   # 레이어 불러오기
 TAB_CN_EDIT = 1   # CN값 편집 (.ui 원본 위치 유지)
 TAB_MAPPING = 2   # 토지이용 재분류 (insertTab(2,...)로 삽입)
 TAB_RECALC  = 3   # CN값 계산
+TAB_REPORT  = 4   # 보고서 출력 (addTab 으로 추가)
 
 # ── 카드 기반 다이얼로그 스타일 (reference/region_selector_dialog.py 기준) ──
 DIALOG_STYLESHEET = """
@@ -592,7 +595,9 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self._init_cn_table_widget()
         self._setup_mapping_tab()
         self._enhance_recalc_tab()
-        self._setup_output_format_row()
+        self._setup_memory_list_card()     # CN값 계산 탭: 저장된 CN 메모리 목록
+        self._setup_report_tab()           # '보고서 출력' 탭 신설(출력 위젯 이동 + 단계 드롭다운)
+        self._refresh_stage_combos()
         # 초기화 버튼 — Tab 0 버튼 행(hLayoutButtons)에 삽입
         self.btnReset = QPushButton("초기화")
         self.btnReset.setMinimumWidth(80)
@@ -621,11 +626,22 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
                 self.cmbLayer.addItem(layer.name(), layer.id())
 
     def _refresh_recalc_layer_list(self):
+        # CN 결과 레이어 — 'cn값' 필드 보유(사용자 지정 이름 포함) 또는 'CN값_input*' 이름 + 피처수.
         self.cmbRecalcLayer.clear()
         for layer in QgsProject.instance().mapLayers().values():
-            if (layer.type() == QgsMapLayerType.VectorLayer and
-                    layer.name() == "CN값_input"):
-                self.cmbRecalcLayer.addItem(layer.name(), layer.id())
+            if layer.type() != QgsMapLayerType.VectorLayer:
+                continue
+            try:
+                has_cn = layer.fields().indexOf("cn값") >= 0
+            except Exception:
+                has_cn = False
+            if has_cn or layer.name().startswith("CN값_input"):
+                try:
+                    n = layer.featureCount()
+                except Exception:
+                    n = -1
+                label = layer.name() if n < 0 else f"{layer.name()} · {n}피처"
+                self.cmbRecalcLayer.addItem(label, layer.id())
 
     def _init_cn_table_widget(self):
         tbl = self.tblCnValues
@@ -747,6 +763,9 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             self._load_cn_to_table()
         elif index == TAB_RECALC:
             self._refresh_recalc_layer_list()
+            self._refresh_memory_list_ui()
+        elif index == TAB_REPORT:
+            self._refresh_stage_combos()
         elif index == TAB_MAPPING:
             if not self._mapping_tab_loaded:
                 self._mapping_load_saved()
@@ -1246,6 +1265,10 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         return folder
 
     def _export_results(self):
+        # 3단계 비교 모드면 단계별 경로로 분기(단일단계 경로는 그대로 보존).
+        if getattr(self, 'chkStaged', None) is not None and self.chkStaged.isChecked():
+            self._export_staged()
+            return
         try:
             layer = self._get_recalc_layer()
             folder = self._get_output_dir()
@@ -1303,7 +1326,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         # HWP 출력 (부분 실패 허용) — HWPX(zip+xml) 포맷으로 저장
         if want_hwp:
             hwp_path = os.path.join(folder, "results.hwpx")
-            template = self.leHwpTemplate.text().strip() or DEFAULT_HWP_TEMPLATE
+            template = DEFAULT_HWP_TEMPLATE        # 내장 템플릿 고정 사용
             try:
                 # 순수 Python(lxml) 렌더러 — 한컴오피스/COM 불필요.
                 from .core.hwpx_writer import render_hwpx, HwpxRenderError
@@ -1750,6 +1773,486 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         if path:
             self.leHwpTemplate.setText(path)
 
+    # ── 개발 전/중/후 3단계 비교 보고서 ───────────────────────────────────────
+
+    def _setup_memory_list_card(self):
+        """CN값 계산 탭: 저장된 CN 메모리 목록(이름·요약 + 지우기).
+
+        CN값 계산 실행 시 입력한 레이어 이름으로 결과가 메모리에 저장된다.
+        개발 전/중/후 단계 선택·보고서 출력은 [보고서 출력] 탭에서 한다.
+        """
+        self._memory_pool = {}
+        target = getattr(self, '_recalc_content_layout', None) \
+            or self.tabWidget.widget(TAB_RECALC).layout()
+
+        card = QFrame()
+        card.setObjectName("memListCard")
+        card.setStyleSheet(
+            "QFrame#memListCard { background-color: white; border: 1px solid #e5e7eb;"
+            "  border-radius: 8px; }"
+        )
+        v = QVBoxLayout(card)
+        v.setSpacing(8)
+        v.setContentsMargins(16, 14, 16, 14)
+
+        title = QLabel("저장된 CN 메모리")
+        title.setStyleSheet("font-size: 14px; font-weight: bold; color: #374151; border: none;")
+        v.addWidget(title)
+        info = QLabel(
+            "[CN값 계산 실행] 시 입력한 '레이어 이름'으로 결과가 메모리에 저장됩니다. "
+            "개발 전/중/후 단계 지정과 보고서 출력은 [보고서 출력] 탭에서 합니다."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #6b7280; font-size: 12px; border: none;")
+        v.addWidget(info)
+
+        self._memory_list_layout = QVBoxLayout()
+        self._memory_list_layout.setSpacing(4)
+        v.addLayout(self._memory_list_layout)
+
+        target.addWidget(card)
+        self._refresh_memory_list_ui()
+
+    def _setup_report_tab(self):
+        """'보고서 출력' 탭 신설(창 전환). CN값 계산 탭의 출력 위젯을 이 탭으로 이동(reparent).
+
+        구성: 출력 설정(결과 저장 폴더 + 출력 포맷 + HWP 템플릿) + 3단계 비교 미리보기/사유 +
+        결과 내보내기. 단계는 보고서 탭 드롭다운으로 메모리(self._memory_pool)에서 선택한다.
+        """
+        self._staged_report = None
+
+        tab = QWidget()
+        tab.setStyleSheet("background-color: #f9fafb;")
+        outer = QVBoxLayout(tab)
+        outer.setSpacing(0)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        content = QWidget()
+        rlay = QVBoxLayout(content)
+        rlay.setSpacing(12)
+        rlay.setContentsMargins(16, 16, 16, 16)
+        self._report_layout = rlay
+
+        # 1) 출력 설정 카드
+        out_card = QFrame()
+        out_card.setObjectName("reportOutCard")
+        out_card.setStyleSheet(
+            "QFrame#reportOutCard { background-color: white; border: 1px solid #e5e7eb;"
+            "  border-radius: 8px; }"
+        )
+        ov = QVBoxLayout(out_card)
+        ov.setSpacing(10)
+        ov.setContentsMargins(16, 14, 16, 14)
+        ot = QLabel("출력 설정")
+        ot.setStyleSheet("font-size: 14px; font-weight: bold; color: #374151; border: none;")
+        ov.addWidget(ot)
+
+        # 결과 저장 폴더 — .ui 위젯을 이 탭으로 이동
+        dir_row = QHBoxLayout()
+        dir_row.setSpacing(8)
+        self.lblOutputDir.setMinimumWidth(110)
+        dir_row.addWidget(self.lblOutputDir)
+        dir_row.addWidget(self.leOutputDir)
+        dir_row.addWidget(self.btnOutputDir)
+        ov.addLayout(dir_row)
+
+        # 출력 포맷
+        fmt_row = QHBoxLayout()
+        fmt_row.setSpacing(8)
+        flbl = QLabel("출력 포맷")
+        flbl.setStyleSheet("color: #6b7280; font-size: 13px; border: none;")
+        flbl.setMinimumWidth(110)
+        fmt_row.addWidget(flbl)
+        self.chkExportExcel = QCheckBox("Excel (.xlsx)")
+        self.chkExportExcel.setChecked(True)
+        self.chkExportHwp = QCheckBox("한글 (.hwpx)")
+        self.chkExportHwp.setChecked(False)
+        fmt_row.addWidget(self.chkExportExcel)
+        fmt_row.addWidget(self.chkExportHwp)
+        fmt_row.addStretch()
+        ov.addLayout(fmt_row)
+
+        # HWP 템플릿은 내장본(cn_report.hwpx) 고정 사용 — 경로 입력 불필요
+        hint = QLabel("※ 한글 보고서는 내장 템플릿(cn_report.hwpx)으로 출력됩니다.")
+        hint.setStyleSheet("color: #9ca3af; font-size: 11px; border: none;")
+        ov.addWidget(hint)
+        rlay.addWidget(out_card)
+
+        # CN값 계산 탭에 남은 입력 카드 제목 정리(이제 레이어 선택만 남음)
+        if hasattr(self, 'lblRecalcInputTitle'):
+            self.lblRecalcInputTitle.setText("CN값_input 레이어")
+
+        # 2) 3단계 비교(미리보기/사유)
+        self._setup_staged_report_section(rlay)
+
+        # 3) 보고서 출력 버튼(신규) — 기존 .ui 버튼은 숨김(시그널은 동일 _export_results)
+        self.btnExportResult1.setVisible(False)
+        exp_row = QHBoxLayout()
+        exp_row.setSpacing(8)
+        exp_row.addStretch()
+        self.btnReportExport = QPushButton("보고서 출력")
+        self.btnReportExport.setMinimumHeight(38)
+        self.btnReportExport.setMinimumWidth(140)
+        self.btnReportExport.setStyleSheet(
+            "QPushButton { background-color: #1f2937; color: white; border: none;"
+            "  border-radius: 6px; padding: 8px 24px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #374151; }"
+        )
+        self.btnReportExport.clicked.connect(self._export_results)
+        exp_row.addWidget(self.btnReportExport)
+        rlay.addLayout(exp_row)
+        rlay.addStretch()
+
+        # 스크롤 래핑
+        scroll = QScrollArea()
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        outer.addWidget(scroll)
+
+        self.tabWidget.addTab(tab, "보고서 출력")
+
+    def _setup_staged_report_section(self, parent_layout):
+        """보고서 탭: 3단계 비교 토글 + 개발 전/중/후 드롭다운(메모리 선택) + 미리보기/사유 표."""
+        self._stage_combos = {}
+        card = QFrame()
+        card.setObjectName("stagedCard")
+        card.setStyleSheet(
+            "QFrame#stagedCard { background-color: white; border: 1px solid #e5e7eb;"
+            "  border-radius: 8px; }"
+        )
+        v = QVBoxLayout(card)
+        v.setSpacing(10)
+        v.setContentsMargins(16, 14, 16, 14)
+
+        self.chkStaged = QCheckBox("개발 전/중/후 3단계 비교 보고서로 출력 (표 4-17 증감비교)")
+        self.chkStaged.setStyleSheet(
+            "font-size: 14px; font-weight: bold; color: #374151; border: none;")
+        self.chkStaged.setChecked(False)
+        v.addWidget(self.chkStaged)
+
+        info = QLabel(
+            "[CN값 계산] 탭에서 저장한 개발 전/중/후 단계로 증감 비교표(표4-17)와 단계별 산정결과표"
+            "(표4-19)를 한글 보고서로 출력합니다. 미리보기로 표를 확인하고 적정성 사유를 입력하세요. "
+            "(체크 해제 시 단일 결과로 출력)"
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #6b7280; font-size: 12px; border: none;")
+        v.addWidget(info)
+
+        self._staged_body = QWidget()
+        body = QVBoxLayout(self._staged_body)
+        body.setSpacing(8)
+        body.setContentsMargins(0, 0, 0, 0)
+
+        # 개발 전/중/후 = 저장된 메모리에서 선택(드롭다운)
+        stage_tint = {STAGE_PRE: "#ecfdf5", STAGE_DURING: "#fffbeb", STAGE_POST: "#fef2f2"}
+        for stage in DEFAULT_STAGE_ORDER:
+            srow = QHBoxLayout()
+            srow.setSpacing(8)
+            slbl = QLabel(stage)
+            slbl.setStyleSheet("color: #374151; font-size: 13px; font-weight: 600; border: none;")
+            slbl.setMinimumWidth(70)
+            srow.addWidget(slbl)
+            cmb = QComboBox()
+            cmb.addItem("(미지정)", "")
+            cmb.setStyleSheet(
+                "QComboBox { border: 1px solid #d1d5db; border-radius: 4px;"
+                f"  padding: 4px 8px; background-color: {stage_tint.get(stage, 'white')}; color: #374151; }}"
+                "QComboBox:hover { border-color: #9ca3af; }")
+            srow.addWidget(cmb, 1)
+            self._stage_combos[stage] = cmb
+            body.addLayout(srow)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+        self.btnStagedPreview = QPushButton("비교표 미리보기 / 사유 입력")
+        self.btnStagedPreview.setStyleSheet(
+            "QPushButton { border: 1px solid #374151; color: #374151; border-radius: 6px;"
+            "  padding: 5px 12px; background: white; font-weight: 600; }"
+            "QPushButton:hover { background-color: #f3f4f6; }"
+        )
+        btn_row.addWidget(self.btnStagedPreview)
+        body.addLayout(btn_row)
+
+        self.tblStaged = QTableWidget(0, 8)
+        self.tblStaged.setHorizontalHeaderLabels([
+            "소유역", "개발 전 CN", "개발 중 CN", "증감(중)",
+            "개발 중 적정성 사유", "개발 후 CN", "증감(후)", "개발 후 적정성 사유",
+        ])
+        hh = self.tblStaged.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        for c in (1, 2, 3, 5, 6):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.Stretch)
+        hh.setSectionResizeMode(7, QHeaderView.Stretch)
+        self.tblStaged.verticalHeader().setDefaultSectionSize(30)
+        self.tblStaged.verticalHeader().setVisible(False)
+        self.tblStaged.setMinimumHeight(160)
+        body.addWidget(self.tblStaged)
+
+        v.addWidget(self._staged_body)
+        parent_layout.addWidget(card)
+
+        self._staged_set_body_enabled(False)
+        self.chkStaged.toggled.connect(self._on_staged_toggled)
+        self.btnStagedPreview.clicked.connect(self._staged_preview)
+
+    def _staged_set_body_enabled(self, on: bool):
+        if getattr(self, '_staged_body', None) is not None:
+            self._staged_body.setEnabled(on)
+
+    def _on_staged_toggled(self, checked: bool):
+        self._staged_set_body_enabled(checked)
+        if checked:
+            self._refresh_stage_combos()
+            # 3단계 비교 보고서는 한글(.hwpx) 출력이 핵심 → 자동 체크
+            if getattr(self, 'chkExportHwp', None) is not None and not self.chkExportHwp.isChecked():
+                self.chkExportHwp.setChecked(True)
+
+    def _save_to_memory(self, name: str, layer):
+        """레이어의 CN 계산 결과를 '이름'으로 메모리에 저장(스냅샷). 같은 이름은 덮어쓴다."""
+        try:
+            r1, r2, _null = calculate_results(layer)
+            ares = build_analysis_result(r1, r2, meta=self._build_staged_meta(name))
+        except Exception as e:
+            logger.exception("메모리 저장 계산 오류")
+            self._recalc_log(f"   [경고] '{name}' 메모리 저장 실패: {e}")
+            return
+        cns = [s.amc3_cn for s in ares.summary_rows if s.amc3_cn]
+        mean_cn = (sum(cns) / len(cns)) if cns else 0.0
+        from datetime import datetime
+        self._memory_pool[name] = {
+            'layer_name': name, 'layer_id': layer.id(), 'result': ares,
+            'n_ws': len(ares.summary_rows), 'mean_cn': mean_cn,
+            'at': datetime.now().strftime("%H:%M:%S"),
+        }
+        self._refresh_memory_list_ui()
+        self._refresh_stage_combos()
+        self._recalc_log(
+            f"   ✔ 메모리 저장: '{name}' (소유역 {len(ares.summary_rows)}개 · 평균 CN {mean_cn:.1f})")
+
+    def _delete_memory(self, name: str):
+        if name in getattr(self, '_memory_pool', {}):
+            del self._memory_pool[name]
+            self._refresh_memory_list_ui()
+            self._refresh_stage_combos()
+            self._recalc_log(f"   메모리 삭제: '{name}'")
+
+    def _clear_layout(self, lay):
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+            elif item.layout() is not None:
+                self._clear_layout(item.layout())
+
+    def _refresh_memory_list_ui(self):
+        """CN값 계산 탭의 '저장된 CN 메모리' 목록 갱신."""
+        lay = getattr(self, '_memory_list_layout', None)
+        if lay is None:
+            return
+        self._clear_layout(lay)
+        pool = getattr(self, '_memory_pool', {})
+        if not pool:
+            empty = QLabel("(저장된 메모리 없음 — 레이어 이름 입력 후 CN값 계산을 실행하세요)")
+            empty.setStyleSheet("color: #9ca3af; font-size: 12px; border: none;")
+            lay.addWidget(empty)
+            return
+        for name, slot in pool.items():
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            lbl = QLabel(f"• {name} · 소유역 {slot['n_ws']}개 · 평균 CN {slot['mean_cn']:.1f} · {slot['at']}")
+            lbl.setStyleSheet("color: #166534; font-size: 12px; font-weight: 600; border: none;")
+            row.addWidget(lbl, 1)
+            btn = QPushButton("지우기")
+            btn.setStyleSheet(
+                "QPushButton { border: 1px solid #d1d5db; color: #6b7280; border-radius: 6px;"
+                "  padding: 2px 10px; background: white; }"
+                "QPushButton:hover { background-color: #f3f4f6; }")
+            btn.clicked.connect(lambda _checked=False, n=name: self._delete_memory(n))
+            row.addWidget(btn)
+            lay.addLayout(row)
+
+    def _refresh_stage_combos(self):
+        """보고서 탭 개발 전/중/후 드롭다운을 메모리 목록으로 갱신(이전 선택 보존)."""
+        combos = getattr(self, '_stage_combos', None)
+        if not combos:
+            return
+        names = list(getattr(self, '_memory_pool', {}).keys())
+        for cmb in combos.values():
+            prev = cmb.currentData()
+            cmb.clear()
+            cmb.addItem("(미지정)", "")
+            for n in names:
+                cmb.addItem(n, n)
+            i = cmb.findData(prev) if prev else 0
+            cmb.setCurrentIndex(i if i >= 0 else 0)
+
+    def _build_staged_meta(self, stage: str = "") -> ProjectMeta:
+        folder = self.leOutputDir.text().strip()
+        return ProjectMeta(
+            project_name=os.path.basename(folder) if folder else "",
+            land_cover_level=self._get_selected_level_key(),
+            data_source=self._get_selected_data_source(),
+            development_stage=stage or "개발 전/중/후",
+        )
+
+    def _collect_staged_reasons(self) -> dict:
+        """미리보기 표 → {소유역명: (개발중 사유, 개발후 사유)} (사용자 입력 보존용)."""
+        out = {}
+        tbl = getattr(self, 'tblStaged', None)
+        if tbl is None:
+            return out
+        for r in range(tbl.rowCount()):
+            ws_item = tbl.item(r, 0)
+            if ws_item is None or not ws_item.text().strip():
+                continue
+            rd = tbl.item(r, 4)
+            rp = tbl.item(r, 7)
+            out[ws_item.text().strip()] = (
+                rd.text().strip() if rd else "",
+                rp.text().strip() if rp else "",
+            )
+        return out
+
+    def _populate_staged_table(self, report) -> None:
+        tbl = self.tblStaged
+        rows = report.cn_delta_rows
+        tbl.setRowCount(len(rows))
+
+        def _cn(v):
+            return "" if v is None else f"{v:.2f}"
+
+        def _inc(v):
+            if v is None:
+                return "-"
+            if v > 0:
+                return f"증) {v:.2f}"
+            if v < 0:
+                return f"감) {abs(v):.2f}"
+            return "-"
+
+        ro_cols = {0, 1, 2, 3, 5, 6}      # 읽기전용(편집 가능 = 사유 4·7)
+        for r, d in enumerate(rows):
+            vals = [
+                d.watershed, _cn(d.cn_pre), _cn(d.cn_during), _inc(d.delta_during),
+                d.reason_during or "", _cn(d.cn_post), _inc(d.delta_post), d.reason_post or "",
+            ]
+            for c, text in enumerate(vals):
+                item = QTableWidgetItem(text)
+                if c in ro_cols:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    if c != 0:
+                        item.setTextAlignment(Qt.AlignCenter)
+                tbl.setItem(r, c, item)
+
+    def _staged_build_report(self, *, announce: bool = True):
+        """메모리에 저장된 단계 슬롯(스냅샷)으로 StagedReport 조립. 실패 시 None.
+
+        계산은 '단계로 저장' 시점에 끝나 있어 여기선 재계산하지 않는다(스냅샷 사용).
+        입력된 적정성 사유는 소유역명 매칭으로 보존한다(cn_delta_rows 소유역명은 유일).
+        """
+        pool = getattr(self, '_memory_pool', {})
+        sel = {}
+        for stage, cmb in (getattr(self, '_stage_combos', None) or {}).items():
+            nm = cmb.currentData()
+            if nm and nm in pool:
+                sel[stage] = nm
+        present = [s for s in DEFAULT_STAGE_ORDER if s in sel]
+        if len(present) < 2:
+            if announce:
+                QMessageBox.warning(
+                    self, "3단계 비교",
+                    "비교하려면 개발 전/중/후 중 2개 이상에 저장된 메모리를 지정하세요.")
+            return None
+        if STAGE_PRE not in sel:
+            if announce:
+                QMessageBox.warning(
+                    self, "3단계 비교",
+                    "증감(②-①, ③-①)은 개발 전(①) 기준입니다. '개발 전'을 지정하세요.")
+            return None
+
+        prev_reasons = self._collect_staged_reasons()
+        stage_results = {s: pool[sel[s]]['result'] for s in present}
+        report = assemble_staged_report(stage_results, meta=self._build_staged_meta())
+        for row in report.cn_delta_rows:        # 사유 재주입(이름 키 — cn_delta_rows 소유역명 유일)
+            keep = prev_reasons.get(row.watershed)
+            if keep:
+                row.reason_during, row.reason_post = keep
+
+        cur_ws = {r.watershed for r in report.cn_delta_rows}
+        lost = sorted({ws for ws, (rd, rp) in prev_reasons.items() if rd or rp} - cur_ws)
+        if lost:
+            self._recalc_log(f"  [경고] 단계 변경으로 사유 보존 실패: {', '.join(lost)}")
+
+        self._staged_report = report
+        self._populate_staged_table(report)
+        return report
+
+    def _staged_preview(self):
+        report = self._staged_build_report(announce=True)
+        if report is not None:
+            self._recalc_log(
+                f"3단계 비교표 미리보기: 소유역 {len(report.cn_delta_rows)}개 "
+                f"(단계 {len(report.stage_order)}개). 적정성 사유 셀에 입력 후 결과 내보내기.")
+
+    def _export_staged(self):
+        """3단계 비교 보고서 내보내기 — 한글(표4-17/18/19) + 단계별 Excel."""
+        want_excel = getattr(self, 'chkExportExcel', None) is None or self.chkExportExcel.isChecked()
+        want_hwp = getattr(self, 'chkExportHwp', None) is not None and self.chkExportHwp.isChecked()
+        if not (want_excel or want_hwp):
+            QMessageBox.warning(self, "입력 오류", "Excel 또는 한글 중 하나 이상 선택해야 합니다.")
+            return
+        try:
+            folder = self._get_output_dir()
+        except ValueError as e:
+            QMessageBox.warning(self, "입력 오류", str(e))
+            return
+
+        self._recalc_log("▶ 3단계 비교 보고서 내보내기 시작...")
+        # 저장된 단계 슬롯(스냅샷)으로 보고서 생성(입력된 사유 보존)
+        report = self._staged_build_report(announce=True)
+        if report is None:
+            return
+
+        summary_lines: list[str] = []
+
+        # 한글(.hwpx) — 표4-17 증감 + 표4-18 기준 + 표4-19 단계 결과
+        if want_hwp:
+            hwp_path = os.path.join(folder, "results_3stage.hwpx")
+            template = DEFAULT_HWP_TEMPLATE        # 내장 템플릿 고정 사용
+            try:
+                from .core.hwpx_writer import render_staged_report
+                self._recalc_log(f"  3단계 HWPX 저장 중... ({hwp_path})")
+                render_staged_report(report, template, hwp_path)
+                self._recalc_log("  ✔ 3단계 한글 보고서 저장 완료")
+                summary_lines.append(f"HWP(3단계): {hwp_path}")
+            except Exception as e:
+                logger.exception("3단계 HWP 내보내기 오류")
+                self._recalc_log(f"  [경고] 3단계 HWP 저장 실패: {e}")
+                summary_lines.append(f"HWP(3단계): 실패 — {e}")
+
+        # Excel — 하나의 파일에 단계별 시트(개발 전/중/후)
+        if want_excel:
+            xpath = os.path.join(folder, "results_3stage.xlsx")
+            try:
+                export_excel_staged(report.ordered_stages(), xpath)
+                self._recalc_log(f"  ✔ Excel 저장(단계별 시트): {os.path.basename(xpath)}")
+                summary_lines.append(f"Excel(3단계): {xpath}")
+            except Exception as e:
+                logger.exception("3단계 Excel 내보내기 오류")
+                self._recalc_log(f"  [경고] Excel 저장 실패: {e}")
+                summary_lines.append(f"Excel(3단계): 실패 — {e}")
+
+        if report.stage_order:        # 어떤 단계가 실제 포함됐는지 명시(조용한 누락 방지)
+            summary_lines.insert(0, f"포함 단계: {' / '.join(report.stage_order)}")
+        QMessageBox.information(self, "저장 결과",
+                               "\n".join(summary_lines) or "출력된 파일이 없습니다.")
+
     def _enhance_recalc_tab(self):
         """CN값 계산 탭 상단에 'CN값 계산' 카드를 동적으로 추가."""
         recalc_tab = self.tabWidget.widget(TAB_RECALC)
@@ -1803,6 +2306,18 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.progressBarCalc.setVisible(False)
         card_layout.addWidget(self.progressBarCalc)
 
+        # 레이어 이름 입력(메모리 저장 키로 사용)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(8)
+        name_lbl = QLabel("레이어 이름")
+        name_lbl.setStyleSheet("color: #6b7280; font-size: 13px; border: none;")
+        name_lbl.setMinimumWidth(80)
+        name_row.addWidget(name_lbl)
+        self.leLayerName = QLineEdit()
+        self.leLayerName.setPlaceholderText("예: 개발전_CN  (비우면 CN값_input)")
+        name_row.addWidget(self.leLayerName)
+        card_layout.addLayout(name_row)
+
         # 버튼 행
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -1847,6 +2362,9 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             elif item.layout():
                 container_layout.addLayout(item.layout())
             # spacerItem은 건너뜀 (불필요한 여백 제거)
+
+        # CN값 계산 탭 컨텐츠 레이아웃 보관(메모리 관리 카드 추가용)
+        self._recalc_content_layout = container_layout
 
         # 원래 레이아웃을 스크롤 전용으로 변경
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2188,13 +2706,17 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             else:
                 self._recalc_log("   ✔ 모든 피처 CN값 매칭 완료")
 
-            # 레이어 추가
+            # 레이어 추가 — 사용자 지정 이름(메모리 저장 키)
             self.progressBarCalc.setValue(4)
             QApplication.processEvents()
-            cn_input_layer.setName("CN값_input")
+            layer_name = (self.leLayerName.text().strip()
+                          if hasattr(self, 'leLayerName') else "") or "CN값_input"
+            cn_input_layer.setName(layer_name)
             QgsProject.instance().addMapLayer(cn_input_layer)
-            self._recalc_log("   ✦ 레이어 추가됨: [CN값_input]")
+            self._recalc_log(f"   ✦ 레이어 추가됨: [{layer_name}]")
             self._refresh_recalc_layer_list()
+            # 계산 결과를 그 이름으로 메모리에 저장(스냅샷)
+            self._save_to_memory(layer_name, cn_input_layer)
 
             self.progressBarCalc.setValue(5)
             self._recalc_log("━" * 44)

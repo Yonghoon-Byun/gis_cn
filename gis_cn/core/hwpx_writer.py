@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import zipfile
 from copy import deepcopy
 from pathlib import Path
@@ -35,6 +36,10 @@ ORIG_MARGIN = {"top": "4252", "bottom": "4252", "left": "4252", "right": "4252",
 
 # 산정결과표(표 4-19) res.* 셀필드 (prefix 'res')
 RES_PREFIX = "res"
+
+# 표4-19 한 표(페이지)당 데이터행 예산 — 원본 실측(가로방향, ~28~32행) 기준.
+# 초과 시 소유역 블록 경계에서 표를 분할하고 다음 장에 이어 출력(repeatHeader 로 헤더 반복).
+RES_ROWS_PER_TABLE = 28
 META_FIELDS = (
     "meta.project_name", "meta.site_name", "meta.author",
     "meta.organization", "meta.analysis_date", "meta.development_stage",
@@ -62,6 +67,17 @@ def _import_lxml():
 
 def _fmt_area(v: Optional[float]) -> str:
     return "" if v is None else f"{v:,.3f}"
+
+
+def _fmt_num(v) -> str:
+    """엑셀 #,##0 포맷 일치 — 정수+천단위 콤마, 0='-', None/빈값=''. (표4-19 산정결과표)"""
+    if v is None or v == "":
+        return ""
+    try:
+        n = round(float(v))
+    except (TypeError, ValueError):
+        return str(v)
+    return "-" if n == 0 else f"{n:,}"
 
 
 def _fmt_cn(v) -> str:
@@ -223,12 +239,12 @@ def _res_row(prefix: str, stage: str, ws: str, row: LandUseRow) -> "dict[str, st
     p = lambda local: f"{prefix}.{local}"
     return {
         p("stage"): stage, p("ws"): ws, p("lu"): row.land_use,
-        p("a_area"): _fmt_area(row.a_area), p("a_cn"): _fmt_cn(row.a_cn),
-        p("b_area"): _fmt_area(row.b_area), p("b_cn"): _fmt_cn(row.b_cn),
-        p("c_area"): _fmt_area(row.c_area), p("c_cn"): _fmt_cn(row.c_cn),
-        p("d_area"): _fmt_area(row.d_area), p("d_cn"): _fmt_cn(row.d_cn),
-        p("total_area"): _fmt_area(row.total_area),
-        p("amc2_cn"): _fmt_cn(row.amc2_cn), p("amc3_cn"): _fmt_cn(row.amc3_cn),
+        p("a_area"): _fmt_num(row.a_area), p("a_cn"): _fmt_num(row.a_cn),
+        p("b_area"): _fmt_num(row.b_area), p("b_cn"): _fmt_num(row.b_cn),
+        p("c_area"): _fmt_num(row.c_area), p("c_cn"): _fmt_num(row.c_cn),
+        p("d_area"): _fmt_num(row.d_area), p("d_cn"): _fmt_num(row.d_cn),
+        p("total_area"): _fmt_num(row.total_area),
+        p("amc2_cn"): _fmt_num(row.amc2_cn), p("amc3_cn"): _fmt_num(row.amc3_cn),
     }
 
 
@@ -236,12 +252,12 @@ def _res_summary_row(prefix: str, stage: str, block: WatershedBlock) -> "dict[st
     p = lambda local: f"{prefix}.{local}"
     return {
         p("stage"): stage, p("ws"): block.name, p("lu"): "합계",
-        p("a_area"): _fmt_area(block.total_a or None), p("a_cn"): "",
-        p("b_area"): _fmt_area(block.total_b or None), p("b_cn"): "",
-        p("c_area"): _fmt_area(block.total_c or None), p("c_cn"): "",
-        p("d_area"): _fmt_area(block.total_d or None), p("d_cn"): "",
-        p("total_area"): _fmt_area(block.total_area),
-        p("amc2_cn"): _fmt_cn(block.amc2_cn), p("amc3_cn"): _fmt_cn(block.amc3_cn),
+        p("a_area"): _fmt_num(block.total_a or None), p("a_cn"): "",
+        p("b_area"): _fmt_num(block.total_b or None), p("b_cn"): "",
+        p("c_area"): _fmt_num(block.total_c or None), p("c_cn"): "",
+        p("d_area"): _fmt_num(block.total_d or None), p("d_cn"): "",
+        p("total_area"): _fmt_num(block.total_area),
+        p("amc2_cn"): _fmt_num(block.amc2_cn), p("amc3_cn"): _fmt_num(block.amc3_cn),
     }
 
 
@@ -257,6 +273,162 @@ def _detail_rows(blocks: "list[WatershedBlock]", prefix: str, stage: str = "") -
             out.append(_res_row(prefix, stage, block.name, row))
         out.append(_res_summary_row(prefix, stage, block))
     return out
+
+
+def _plan_table_groups(stage_blocks, budget: int = RES_ROWS_PER_TABLE):
+    """(단계, 블록) 시퀀스를 표(페이지)별 그룹으로 분할. 블록은 쪼개지 않는다.
+
+    블록 데이터행수 = 토지이용행 + 합계행 1. 누적이 budget 초과면 블록 경계에서 새 표 시작.
+    """
+    groups: list[list] = []
+    cur: list = []
+    cur_rows = 0
+    for stage, block in stage_blocks:
+        n = len(block.rows) + 1
+        # 단계가 바뀌면 무조건 새 표(섹터 분리), 같은 단계 내에서는 행 예산 초과 시 분할.
+        if cur and (cur[-1][0] != stage or cur_rows + n > budget):
+            groups.append(cur)
+            cur, cur_rows = [], 0
+        cur.append((stage, block))
+        cur_rows += n
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def _group_rows(group, prefix: str) -> "list[dict[str, str]]":
+    """한 그룹(=한 표)의 데이터행 dict 생성(전체 값). 단계/소유역 병합은 렌더 후 _merge_res_columns."""
+    rows: list[dict] = []
+    for stage, block in group:
+        for row in block.rows:
+            rows.append(_res_row(prefix, stage, block.name, row))
+        rows.append(_res_summary_row(prefix, stage, block))
+    return rows
+
+
+# res 표 세로 병합 컬럼: (필드 local 명, colAddr). 단계=0, 소유역=1.
+RES_MERGE_COLS = (("stage", 0), ("ws", 1))
+
+
+def _merge_res_columns(doc: "_Doc", table, data_rows: "list[dict]", prefix: str) -> None:
+    """단계(col0)/소유역(col1) 연속 동일값을 세로 병합(cellSpan rowSpan>1) — 진짜 셀병합.
+
+    구간 첫 행 셀에 rowSpan=k 설정, 나머지 행의 해당 tc(누름틀 포함) 제거. 표 분할이 단계/소유역
+    경계에서 일어나 구간이 표를 넘지 않으므로 한 표 안에서만 병합. rowAddr 는 _render_dynamic_table
+    이 재번호 완료 — 여기선 cellSpan 설정·tc 제거만(제거 tc 는 fieldBegin/End 쌍째 사라져 고아 없음).
+    """
+    hp = doc.hp
+    n = len(data_rows)
+    if n <= 1:
+        return
+    all_trs = table.findall(hp("tr"))
+    data_trs = all_trs[len(all_trs) - n:]
+
+    def tc_at(tr, col):
+        for tc in tr.findall(hp("tc")):
+            ca = tc.find(hp("cellAddr"))
+            if ca is not None and ca.get("colAddr") == str(col):
+                return tc
+        return None
+
+    for local, col in RES_MERGE_COLS:
+        key = f"{prefix}.{local}"
+        vals = [d.get(key, "") for d in data_rows]
+        i = 0
+        while i < n:
+            j = i + 1
+            while j < n and vals[j] == vals[i]:
+                j += 1
+            if j - i > 1:
+                head = tc_at(data_trs[i], col)
+                if head is not None:
+                    sp = head.find(hp("cellSpan"))
+                    if sp is None:
+                        ca = head.find(hp("cellAddr"))
+                        sp = doc.etree.Element(hp("cellSpan"))
+                        sp.set("colSpan", "1")
+                        ca.addnext(sp)
+                    sp.set("rowSpan", str(j - i))
+                    if col == 0:                          # 단계 컬럼: 세로쓰기(개발 전→세로)
+                        sub = head.find(hp("subList"))
+                        if sub is not None:
+                            sub.set("textDirection", "VERTICAL")
+                    for k in range(i + 1, j):
+                        tc = tc_at(data_trs[k], col)
+                        if tc is not None:
+                            data_trs[k].remove(tc)
+            i = j
+
+
+def _strip_table_numbers(doc: "_Doc") -> None:
+    """캡션 표 번호 제거 → '[표]'. 하드코딩형 '[표 4-19]' + 분할형('[표 4-'+autoNum+'] ...') 모두."""
+    hp = doc.hp
+    for t in list(doc.root.iter(hp("t"))):
+        if not t.text or "[표" not in t.text:
+            continue
+        new = re.sub(r"\[표\s*\d+-\d+\]", "[표]", t.text)        # 하드코딩 번호
+        if new != t.text:
+            t.text = new
+            continue
+        if re.search(r"\[표\s*\d+-\s*$", t.text):                # 분할형 앞부분 "[표 4-"
+            run = t.getparent()
+            if run is None:
+                continue
+            for ctrl in run.findall(hp("ctrl")):                 # autoNum(자동번호) 제거
+                if ctrl.find(hp("autoNum")) is not None:
+                    run.remove(ctrl)
+            t.text = re.sub(r"\[표\s*\d+-\s*$", "[표]", t.text)
+            for tt in run.findall(hp("t")):                      # 뒤 "] 제목" → " 제목"
+                if tt is not t and tt.text and tt.text.startswith("]"):
+                    tt.text = tt.text[1:]
+
+
+def _table_paragraph(doc: "_Doc", tbl):
+    """표(tbl)를 감싸는 <hp:p> 단락 반환(없으면 None)."""
+    pt = doc.hp("p")
+    el = tbl
+    while el is not None and el.tag != pt:
+        el = el.getparent()
+    return el
+
+
+def _find_table_with_field_in(doc: "_Doc", scope, prefix: str):
+    for tbl in scope.iter(doc.hp("tbl")):
+        if any((fb.get("name") or "").startswith(prefix + ".")
+               for fb in tbl.iter(doc.hp("fieldBegin"))):
+            return tbl
+    return None
+
+
+def _render_split_res(doc: "_Doc", res_tbl, prefix: str, groups_rows: "list[list[dict]]") -> int:
+    """그룹별로 res 표를 물리 분할해 렌더. 2번째 표부터 포함 단락에 pageBreak=1(다음 장).
+
+    표 포함 <hp:p> 를 그룹 수만큼 deepcopy(원본 프로토타입 보존) → 각 표에 그룹행 렌더.
+    한글이 repeatHeader=1 로 각 표 헤더(2행)를 반복하고, pageBreak 로 페이지를 강제 분리한다.
+    """
+    if not groups_rows:
+        return 0
+    para = _table_paragraph(doc, res_tbl)
+    if para is None or len(groups_rows) == 1:
+        _render_dynamic_table(doc, res_tbl, prefix, groups_rows[0])
+        _merge_res_columns(doc, res_tbl, groups_rows[0], prefix)
+        return 1
+    template_para = deepcopy(para)          # group0 렌더 전 깨끗한 사본(헤더+프로토타입)
+    _render_dynamic_table(doc, res_tbl, prefix, groups_rows[0])
+    _merge_res_columns(doc, res_tbl, groups_rows[0], prefix)
+    prev = para
+    for g in groups_rows[1:]:
+        npara = deepcopy(template_para)
+        npara.set("pageBreak", "1")
+        doc.reassign_field_ids(npara)       # 복제 표의 모든 누름틀 id 유니크화(헤더 포함 — id 중복 방지)
+        ntbl = _find_table_with_field_in(doc, npara, prefix)
+        if ntbl is None:
+            continue
+        _render_dynamic_table(doc, ntbl, prefix, g)
+        _merge_res_columns(doc, ntbl, g, prefix)
+        prev.addnext(npara)
+        prev = npara
+    return len(groups_rows)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,11 +511,14 @@ def render_hwpx(result: AnalysisResult, template, out, *, apply_orig_margin: boo
     res_tbl = doc.find_table_with_field(RES_PREFIX)
     if res_tbl is None:
         raise HwpxRenderError(f"템플릿에 '{RES_PREFIX}.*' 산정결과표 없음")
-    data_rows = _detail_rows(result.detail_blocks, RES_PREFIX, stage=result.meta.development_stage)
-    if not data_rows:
+    stage_blocks = [(result.meta.development_stage, b) for b in result.detail_blocks]
+    if not stage_blocks:
         raise HwpxRenderError("산정결과 데이터가 비어 있습니다 (detail_blocks 없음)")
-    _render_dynamic_table(doc, res_tbl, RES_PREFIX, data_rows)
+    groups_rows = [_group_rows(g, RES_PREFIX) for g in _plan_table_groups(stage_blocks)]
+    data_rows = [r for g in groups_rows for r in g]
+    _render_split_res(doc, res_tbl, RES_PREFIX, groups_rows)
 
+    _strip_table_numbers(doc)
     _validate(doc)
     doc.save(out)
     logger.info("HWPX 저장: %s (res %d행, meta %d필드)", out, len(data_rows), filled_meta)
@@ -415,14 +590,18 @@ def render_staged_report(report: StagedReport, template, out, *, apply_orig_marg
     if delta_tbl is not None and report.cn_delta_rows:
         _render_dynamic_table(doc, delta_tbl, DELTA_PREFIX, _delta_rows_data(report.cn_delta_rows))
 
-    # 표 4-19 산정결과표 (res.*) — 단계별 행에 res.stage 로 단계 표시(전체 단계 누적).
+    # 표 4-19 산정결과표 (res.*) — 단계/소유역 blank-fill + 행수 초과 시 표 물리 분할(다음 장).
     res_tbl = doc.find_table_with_field(RES_PREFIX)
+    stage_blocks = [(stage_name, block)
+                    for stage_name, ares in report.ordered_stages()
+                    for block in ares.detail_blocks]
     res_data: list[dict] = []
-    for stage_name, ares in report.ordered_stages():
-        res_data.extend(_detail_rows(ares.detail_blocks, RES_PREFIX, stage=stage_name))
-    if res_tbl is not None and res_data:
-        _render_dynamic_table(doc, res_tbl, RES_PREFIX, res_data)
+    if res_tbl is not None and stage_blocks:
+        groups_rows = [_group_rows(g, RES_PREFIX) for g in _plan_table_groups(stage_blocks)]
+        res_data = [r for g in groups_rows for r in g]
+        _render_split_res(doc, res_tbl, RES_PREFIX, groups_rows)
 
+    _strip_table_numbers(doc)
     _validate(doc)
     doc.save(out)
     logger.info("HWPX(다단계) 저장: %s (delta %d, res %d행)",

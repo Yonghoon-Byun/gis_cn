@@ -99,9 +99,9 @@ def test_single_stage(tmp: Path) -> None:
     fids = [fb.get("id") for fb in root.iter(hp("fieldBegin"))]
     _assert(len(fids) == len(set(fids)), "fieldBegin id 중복")
     txt = _all_texts(root, hp)
-    for v in ("논", "12,345.678", "합계", "88.41"):
+    for v in ("논", "12,346", "합계", "88"):    # _fmt_num: 12345.678→12,346 / 88.41→88 (엑셀 #,##0)
         _assert(v in txt, f"주입값 누락: {v}")
-    print("  ✓ test_single_stage: res 3행, 값 주입, id 유니크, zip 무결")
+    print("  ✓ test_single_stage: res 3행, 정수포맷 주입, id 유니크, zip 무결")
 
 
 def test_staged(tmp: Path) -> None:
@@ -146,6 +146,76 @@ def test_increment_format() -> None:
     print("  ✓ test_increment_format: 증)/감)/- 표기")
 
 
+def test_merge(tmp: Path) -> None:
+    """단계(col0)/소유역(col1) 진짜 세로 병합(cellSpan rowSpan>1) + grid 정합."""
+    def block(name, n_lu):
+        rows = [_lur(f"토지{i}", 100.0, 79, 1234.5, 76.0, 86.0) for i in range(n_lu)]
+        return ar.WatershedBlock(name=name, rows=rows, total_a=100.0,
+                                 total_area=1234.5, amc2_cn=76.0, amc3_cn=86.5)
+    blocks = [block("GR1", 4), block("GR2", 3)]            # 한 표(작음): 5+4=9 데이터행
+    pre = ar.AnalysisResult(detail_blocks=blocks,
+        summary_rows=[ar.WatershedSummary(name=b.name, total_area=1234.5, amc2_cn=76.0, amc3_cn=86.5) for b in blocks])
+    report = ar.StagedReport(meta=ar.ProjectMeta(), stages={ar.STAGE_PRE: pre},
+        stage_order=[ar.STAGE_PRE], cn_delta_rows=[ar.CnDeltaRow(watershed=b.name, cn_pre=86.5) for b in blocks])
+    out = tmp / "merge.hwpx"
+    hw.render_staged_report(report, TEMPLATE, out)          # 내부 _validate 통과 = grid 정합
+    root, hp = _parse(out)
+    res = next(t for t in root.iter(hp("tbl"))
+               if any((fb.get("name") or "").startswith("res.") for fb in t.iter(hp("fieldBegin"))))
+
+    def data_spans(col):
+        sp_list = []
+        for tr in res.findall(hp("tr")):
+            for tc in tr.findall(hp("tc")):
+                ca, sp = tc.find(hp("cellAddr")), tc.find(hp("cellSpan"))
+                if (ca is not None and ca.get("colAddr") == str(col)
+                        and int(ca.get("rowAddr")) >= 2 and sp is not None and int(sp.get("rowSpan")) > 1):
+                    sp_list.append(int(sp.get("rowSpan")))
+        return sorted(sp_list)
+    _assert(data_spans(0) == [9], f"단계(col0) 병합 {data_spans(0)} (≠[9])")        # 단계 1개 = 전체 9행
+    _assert(data_spans(1) == [4, 5], f"소유역(col1) 병합 {data_spans(1)} (≠[4,5])")  # GR1=5, GR2=4
+    print("  ✓ test_merge: 단계 rowSpan=9, 소유역 rowSpan=[5,4] 진짜 셀병합 + grid 정합")
+
+
+def test_staged_split(tmp: Path) -> None:
+    """소유역 다수 → 28행 예산 초과 → 표 물리 분할 + 연속표 pageBreak=1."""
+    def block(name, n_lu):
+        rows = [_lur(f"토지{i}", 100.0, 79, 1234.5, 76.0, 86.0) for i in range(n_lu)]
+        return ar.WatershedBlock(name=name, rows=rows, total_a=100.0 * n_lu,
+                                 total_area=1234.5 * n_lu, amc2_cn=76.0, amc3_cn=86.5)
+    blocks = [block(f"GR{i+1}", 10) for i in range(5)]      # 5*(10+1)=55행 > 28 → 분할
+    pre = ar.AnalysisResult(
+        detail_blocks=blocks,
+        summary_rows=[ar.WatershedSummary(name=b.name, total_area=b.total_area,
+                                          amc2_cn=76.0, amc3_cn=86.5) for b in blocks])
+    report = ar.StagedReport(
+        meta=ar.ProjectMeta(project_name="분할"),
+        stages={ar.STAGE_PRE: pre}, stage_order=[ar.STAGE_PRE],
+        cn_delta_rows=[ar.CnDeltaRow(watershed=b.name, cn_pre=86.5) for b in blocks])
+    out = tmp / "split.hwpx"
+    hw.render_staged_report(report, TEMPLATE, out)         # 내부 _validate 통과해야 함
+
+    _assert(zipfile.ZipFile(out).testzip() is None, "zip 무결성 실패")
+    root, hp = _parse(out)
+    res_tbls = [t for t in root.iter(hp("tbl"))
+                if any((fb.get("name") or "").startswith("res.") for fb in t.iter(hp("fieldBegin")))]
+    _assert(len(res_tbls) >= 2, f"표 분할 안됨: res 표 {len(res_tbls)}개")
+    for t in res_tbls:
+        _assert(len(t.findall(hp("tr"))) == int(t.get("rowCnt")), "rowCnt≠tr수")
+
+    def _para_pb(tbl):
+        el = tbl
+        while el is not None and etree.QName(el).localname != "p":
+            el = el.getparent()
+        return el.get("pageBreak") if el is not None else None
+    pbs = [_para_pb(t) for t in res_tbls]
+    _assert(pbs[0] != "1", f"첫 표 pageBreak={pbs[0]} (0이어야)")
+    _assert(all(pb == "1" for pb in pbs[1:]), f"연속 표 pageBreak!=1: {pbs}")
+    fids = [fb.get("id") for fb in root.iter(hp("fieldBegin"))]
+    _assert(len(fids) == len(set(fids)), "fieldBegin id 중복")
+    print(f"  ✓ test_staged_split: res 표 {len(res_tbls)}개 분할, 연속표 pageBreak=1, id 유니크")
+
+
 def main() -> int:
     print(f"골든 테스트 (template={TEMPLATE.name})")
     with tempfile.TemporaryDirectory() as d:
@@ -154,6 +224,8 @@ def main() -> int:
             test_increment_format()
             test_single_stage(tmp)
             test_staged(tmp)
+            test_merge(tmp)
+            test_staged_split(tmp)
         except AssertionError as e:
             print(f"  ✗ FAIL: {e}")
             return 1
