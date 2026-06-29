@@ -51,6 +51,13 @@ TAB_MAPPING = 2   # 토지이용 재분류 (insertTab(2,...)로 삽입)
 TAB_RECALC  = 3   # CN값 계산
 TAB_REPORT  = 4   # 보고서 출력 (addTab 으로 추가)
 
+# 탭 표시용 단계 번호 + 기본 라벨 (워크플로우 가독성)
+_TAB_NUM = {TAB_CALC: "①", TAB_CN_EDIT: "②", TAB_MAPPING: "③", TAB_RECALC: "④", TAB_REPORT: "⑤"}
+_TAB_BASE = {
+    TAB_CALC: "레이어 불러오기", TAB_CN_EDIT: "CN값 편집", TAB_MAPPING: "토지이용 재분류",
+    TAB_RECALC: "CN값 계산", TAB_REPORT: "보고서 출력",
+}
+
 # ── 카드 기반 다이얼로그 스타일 (reference/region_selector_dialog.py 기준) ──
 DIALOG_STYLESHEET = """
 * {
@@ -545,6 +552,28 @@ class CnWorker(QThread):
             self.error.emit(str(e))
 
 
+class ExportWorker(QThread):
+    """보고서(한글/엑셀) 렌더링을 UI 스레드에서 분리 — 출력 중 QGIS 멈춤(프리징) 방지.
+    QGIS 의존 계산은 호출 전 UI 스레드에서 끝내고, 순수 렌더/직렬화(lxml/openpyxl/IO)만 실행."""
+    progress = pyqtSignal(str)        # 진행 메시지
+    done     = pyqtSignal(list)       # [(ok: bool, msg: str), ...] — 부분 실패 허용
+
+    def __init__(self, jobs):
+        super().__init__()
+        self._jobs = jobs             # [(label, fn), ...]  fn() -> 요약 문자열
+
+    def run(self):
+        results = []
+        for label, fn in self._jobs:
+            self.progress.emit(label)
+            try:
+                results.append((True, fn()))
+            except Exception as e:
+                logger.exception(f"보고서 출력 작업 실패: {label}")
+                results.append((False, f"{label}: 실패 — {e}"))
+        self.done.emit(results)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 메인 다이얼로그
 # ──────────────────────────────────────────────────────────────────────────────
@@ -598,6 +627,11 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self._setup_memory_list_card()     # CN값 계산 탭: 저장된 CN 메모리 목록
         self._setup_report_tab()           # '보고서 출력' 탭 신설(출력 위젯 이동 + 단계 드롭다운)
         self._refresh_stage_combos()
+        # 워크플로우 가독성: 탭 단계 번호(①~⑤) + 완료 배지(✓), 계산→보고서 '다음 단계' 버튼
+        self._tab_done = {i: False for i in _TAB_BASE}
+        self._export_worker = None
+        self._refresh_tab_titles()
+        self._add_recalc_next_button()
         # 초기화 버튼 — Tab 0 버튼 행(hLayoutButtons)에 삽입
         self.btnReset = QPushButton("초기화")
         self.btnReset.setMinimumWidth(80)
@@ -773,6 +807,92 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
                 self._load_cn_ref_table()
             elif self._cn_ref_dirty:
                 self._sync_cn_ref_from_edit()
+        self._refresh_tab_titles()
+
+    # ── 워크플로우 가독성(탭 번호/배지) ───────────────────────────────────────
+    def _refresh_tab_titles(self):
+        """탭 라벨을 '① 레이어 불러오기' 형태 + 완료 시 ✓ 배지로 갱신."""
+        done = getattr(self, '_tab_done', {})
+        for idx, base in _TAB_BASE.items():
+            mark = "  ✓" if done.get(idx) else ""
+            self.tabWidget.setTabText(idx, f"{_TAB_NUM.get(idx, '')} {base}{mark}")
+
+    def _mark_step_done(self, idx, done: bool = True):
+        if not hasattr(self, '_tab_done'):
+            return
+        self._tab_done[idx] = done
+        self._refresh_tab_titles()
+
+    def _add_recalc_next_button(self):
+        """CN값 계산(④) 탭 하단에 '보고서 출력(⑤)'로 가는 다음 단계 버튼 추가."""
+        w = self.tabWidget.widget(TAB_RECALC)
+        if w is None or w.layout() is None:
+            return
+        self.btnNextStep3 = QPushButton("다음 단계: 보고서 출력 →")
+        self.btnNextStep3.setMinimumHeight(34)
+        self.btnNextStep3.setStyleSheet(
+            "QPushButton { border: 1px solid #374151; color: #374151; border-radius: 6px;"
+            "  padding: 6px 16px; font-weight: 600; background: white; }"
+            "QPushButton:hover { background-color: #f3f4f6; }"
+        )
+        self.btnNextStep3.clicked.connect(lambda: self.tabWidget.setCurrentIndex(TAB_REPORT))
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(self.btnNextStep3)
+        w.layout().addLayout(row)
+
+    # ── 보고서 출력(워커 스레드) ──────────────────────────────────────────────
+    def _run_export_jobs(self, jobs, prefix_lines=None, post=None):
+        """jobs(=[(label, fn)])를 워커 스레드에서 실행. UI는 진행바/대기커서로 응답 유지."""
+        from qgis.PyQt.QtWidgets import QApplication
+        if not jobs:
+            QMessageBox.information(self, "저장 결과", "출력할 형식을 선택하세요.")
+            return
+        if getattr(self, '_export_worker', None) is not None and self._export_worker.isRunning():
+            QMessageBox.information(self, "처리 중", "이미 보고서를 생성 중입니다. 잠시만 기다려 주세요.")
+            return
+        self._export_prefix = list(prefix_lines or [])
+        self._export_post = post
+        self.btnReportExport.setEnabled(False)
+        self.btnReportExport.setText("생성 중...")
+        self._export_progress.setVisible(True)
+        self._export_progress.setRange(0, 0)       # 불확정(진행 애니메이션)
+        self._export_status.setVisible(True)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._export_worker = ExportWorker(jobs)
+        self._export_worker.progress.connect(self._on_export_progress)
+        self._export_worker.done.connect(self._on_export_done)
+        self._export_worker.start()
+
+    def _on_export_progress(self, msg: str):
+        self._export_status.setText(msg)
+        self._recalc_log(f"  {msg}")
+
+    def _on_export_done(self, results):
+        from qgis.PyQt.QtWidgets import QApplication
+        QApplication.restoreOverrideCursor()
+        self._export_progress.setVisible(False)
+        self._export_progress.setRange(0, 1)
+        self._export_status.setVisible(False)
+        self.btnReportExport.setEnabled(True)
+        self.btnReportExport.setText("보고서 출력")
+        lines = list(getattr(self, '_export_prefix', []))
+        any_ok = False
+        for ok, msg in results:
+            lines.append(msg)
+            any_ok = any_ok or ok
+        post = getattr(self, '_export_post', None)
+        if post is not None:
+            try:
+                post(results)
+            except Exception as e:
+                logger.exception("보고서 후처리 오류")
+                lines.append(f"후처리 경고: {e}")
+        if any_ok:
+            self._mark_step_done(TAB_REPORT)
+            self._recalc_log("✔ 보고서 출력 완료")
+        # 워커 참조는 유지 — done 직후 즉시 None 처리하면 QThread 조기 파괴 위험. 다음 출력 시 교체됨.
+        QMessageBox.information(self, "저장 결과", "\n".join(lines) or "출력된 파일이 없습니다.")
 
     def _populate_name_fields_from_layer(self):
         layer_id = self.cmbLayer.currentData()
@@ -998,6 +1118,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self._log("✔ 완료! 중간 레이어가 캔버스에 추가되었습니다.")
         self._log("  → [CN값 계산] 탭으로 이동하여 CN값을 계산하세요.")
         self.btnRun.setEnabled(True)
+        self._mark_step_done(TAB_CALC)
 
     def _on_error(self, msg: str):
         self._log(f"[오류] {msg}")
@@ -1072,7 +1193,9 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self._refresh_recalc_layer_list()
         self.tblWsGroups.setRowCount(0)
 
-        # 8) Tab 0으로 이동
+        # 8) 단계 배지 초기화 + Tab 0으로 이동
+        self._tab_done = {i: False for i in _TAB_BASE}
+        self._refresh_tab_titles()
         self.tabWidget.setCurrentIndex(TAB_CALC)
         self._log("초기화 완료. 처음부터 다시 시작할 수 있습니다.")
 
@@ -1305,55 +1428,43 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             QMessageBox.critical(self, "오류", str(e))
             return
 
-        summary_lines: list[str] = []
-        excel_path: str = ""
-
-        # Excel 출력
+        # 무거운 렌더/직렬화는 워커 스레드로 — UI 멈춤 방지. 데이터 계산은 위에서 완료(UI 스레드).
+        jobs = []
+        excel_path = os.path.join(folder, "result.xlsx")
         if want_excel:
-            excel_path = os.path.join(folder, "result.xlsx")
-            try:
-                self._recalc_log(f"  Excel 저장 중... ({excel_path})")
-                export_results(result1_data, result2_data, excel_path,
-                               grouped_result1=grouped_r1, grouped_result2=grouped_r2)
-                self._recalc_log(f"  ✔ Excel 저장 완료")
-                summary_lines.append(f"Excel: {excel_path}")
-                self._load_xlsx_as_layer(excel_path, "result1", sheet="result1")
-            except Exception as e:
-                logger.exception("Excel 내보내기 오류")
-                self._recalc_log(f"  [오류] Excel 저장 실패: {e}")
-                summary_lines.append(f"Excel: 실패 — {e}")
+            def _job_xlsx(r1=result1_data, r2=result2_data, p=excel_path,
+                          g1=grouped_r1, g2=grouped_r2):
+                export_results(r1, r2, p, grouped_result1=g1, grouped_result2=g2)
+                return f"Excel: {p}"
+            jobs.append(("Excel(.xlsx) 생성 중...", _job_xlsx))
 
-        # HWP 출력 (부분 실패 허용) — HWPX(zip+xml) 포맷으로 저장
         if want_hwp:
             hwp_path = os.path.join(folder, "result.hwpx")
-            template = DEFAULT_HWP_TEMPLATE        # 내장 템플릿 고정 사용
-            try:
-                # 순수 Python(lxml) 렌더러 — 한컴오피스/COM 불필요.
-                from .core.hwpx_writer import render_hwpx, HwpxRenderError
-                # 기준표(표 4-18)는 국가표준 고정표를 build_analysis_result가 자동 로드한다
-                # (cn_reference 미전달). 사용자 편집 CN값(Tab2)은 CN 매칭에만 사용.
-                meta = ProjectMeta(
-                    project_name=os.path.basename(folder),
-                    land_cover_level=self._get_selected_level_key(),
-                    data_source=self._get_selected_data_source(),
-                )
-                result = build_analysis_result(
-                    result1_data, result2_data,
-                    meta=meta,
-                    grouped_result1=grouped_r1, grouped_result2=grouped_r2,
-                    null_cn_rows=null_cn_rows,
-                )
-                self._recalc_log(f"  HWPX 저장 중... ({hwp_path})")
-                render_hwpx(result, template, hwp_path)
-                self._recalc_log(f"  ✔ HWP 저장 완료")
-                summary_lines.append(f"HWP: {hwp_path}")
-            except Exception as e:
-                logger.exception("HWP 내보내기 오류")
-                self._recalc_log(f"  [경고] HWP 저장 실패: {e}")
-                summary_lines.append(f"HWP: 실패 — {e}")
+            # 순수 Python(lxml) 렌더러 — 한컴오피스/COM 불필요.
+            from .core.hwpx_writer import render_hwpx
+            # 기준표(표 4-18)는 국가표준 고정표를 build_analysis_result가 자동 로드(cn_reference 미전달).
+            meta = ProjectMeta(
+                project_name=os.path.basename(folder),
+                land_cover_level=self._get_selected_level_key(),
+                data_source=self._get_selected_data_source(),
+            )
+            result = build_analysis_result(
+                result1_data, result2_data, meta=meta,
+                grouped_result1=grouped_r1, grouped_result2=grouped_r2,
+                null_cn_rows=null_cn_rows,
+            )
 
-        msg = "\n".join(summary_lines) or "출력된 파일이 없습니다."
-        QMessageBox.information(self, "저장 결과", msg)
+            def _job_hwp(res=result, p=hwp_path):
+                render_hwpx(res, DEFAULT_HWP_TEMPLATE, p)
+                return f"HWP: {p}"
+            jobs.append(("한글(.hwpx) 생성 중...", _job_hwp))
+
+        def _post(results, p=excel_path, want=want_excel):
+            # Excel 작업(jobs[0])이 성공했으면 결과를 캔버스에 로드(UI 스레드 전용 작업)
+            if want and results and results[0][0]:
+                self._load_xlsx_as_layer(p, "result1", sheet="result1")
+
+        self._run_export_jobs(jobs, post=_post)
 
     def _collect_cn_reference_rows(self) -> list:
         """Tab 2 CN값 편집표 → [(land_use, a, b, c, d), ...] (HWP 기준표용)."""
@@ -1582,6 +1693,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         mapping = self._mapping_table_to_dict()
         try:
             save_mapping(mapping)
+            self._mark_step_done(TAB_MAPPING)
             QMessageBox.information(
                 self, "저장 완료",
                 f"토지이용 재분류 매핑이 저장되었습니다.\n적용 항목: {len(mapping)}개"
@@ -1890,6 +2002,17 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         self.btnExportResult1.setVisible(False)
         exp_row = QHBoxLayout()
         exp_row.setSpacing(8)
+        # 출력 진행 상태(스레드) — 평소엔 숨김
+        self._export_status = QLabel("")
+        self._export_status.setStyleSheet("color: #6b7280; font-size: 12px; border: none;")
+        self._export_status.setVisible(False)
+        exp_row.addWidget(self._export_status)
+        self._export_progress = QProgressBar()
+        self._export_progress.setFixedHeight(18)
+        self._export_progress.setFixedWidth(150)
+        self._export_progress.setTextVisible(False)
+        self._export_progress.setVisible(False)
+        exp_row.addWidget(self._export_progress)
         exp_row.addStretch()
         self.btnReportExport = QPushButton("보고서 출력")
         self.btnReportExport.setMinimumHeight(38)
@@ -2261,44 +2384,30 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             return
 
         self._recalc_log("▶ 3단계 비교 보고서 내보내기 시작...")
-        # 저장된 단계 슬롯(스냅샷)으로 보고서 생성(입력된 사유 보존)
+        # 보고서 데이터 조립(QGIS 의존) — UI 스레드에서 수행, 무거운 렌더만 워커로
         report = self._staged_build_report(announce=True)
         if report is None:
             return
 
-        summary_lines: list[str] = []
-
-        # 한글(.hwpx) — 표4-17 증감 + 표4-18 기준 + 표4-19 단계 결과
+        jobs = []
         if want_hwp:
             hwp_path = os.path.join(folder, "result.hwpx")
-            template = DEFAULT_HWP_TEMPLATE        # 내장 템플릿 고정 사용
-            try:
-                from .core.hwpx_writer import render_staged_report
-                self._recalc_log(f"  3단계 HWPX 저장 중... ({hwp_path})")
-                render_staged_report(report, template, hwp_path)
-                self._recalc_log("  ✔ 3단계 한글 보고서 저장 완료")
-                summary_lines.append(f"HWP(3단계): {hwp_path}")
-            except Exception as e:
-                logger.exception("3단계 HWP 내보내기 오류")
-                self._recalc_log(f"  [경고] 3단계 HWP 저장 실패: {e}")
-                summary_lines.append(f"HWP(3단계): 실패 — {e}")
+            from .core.hwpx_writer import render_staged_report
 
-        # Excel — 하나의 파일에 단계별 시트(개발 전/중/후)
+            def _job_hwp(r=report, p=hwp_path):
+                render_staged_report(r, DEFAULT_HWP_TEMPLATE, p)
+                return f"HWP(3단계): {p}"
+            jobs.append(("한글(.hwpx) 생성 중...", _job_hwp))
         if want_excel:
             xpath = os.path.join(folder, "result.xlsx")
-            try:
-                export_excel_staged(report.ordered_stages(), xpath)
-                self._recalc_log(f"  ✔ Excel 저장(단계별 시트): {os.path.basename(xpath)}")
-                summary_lines.append(f"Excel(3단계): {xpath}")
-            except Exception as e:
-                logger.exception("3단계 Excel 내보내기 오류")
-                self._recalc_log(f"  [경고] Excel 저장 실패: {e}")
-                summary_lines.append(f"Excel(3단계): 실패 — {e}")
 
-        if report.stage_order:        # 어떤 단계가 실제 포함됐는지 명시(조용한 누락 방지)
-            summary_lines.insert(0, f"포함 단계: {' / '.join(report.stage_order)}")
-        QMessageBox.information(self, "저장 결과",
-                               "\n".join(summary_lines) or "출력된 파일이 없습니다.")
+            def _job_xlsx(r=report, p=xpath):
+                export_excel_staged(r.ordered_stages(), p)
+                return f"Excel(3단계): {p}"
+            jobs.append(("Excel(.xlsx) 생성 중...", _job_xlsx))
+
+        prefix = [f"포함 단계: {' / '.join(report.stage_order)}"] if report.stage_order else []
+        self._run_export_jobs(jobs, prefix_lines=prefix)
 
     def _enhance_recalc_tab(self):
         """CN값 계산 탭 상단에 'CN값 계산' 카드를 동적으로 추가."""
@@ -2777,6 +2886,7 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
             self.progressBarCalc.setValue(5)
             self._recalc_log("━" * 44)
             self._recalc_log("✔ CN값 계산 완료!")
+            self._mark_step_done(TAB_RECALC)
         except Exception as e:
             logger.exception("CN값 계산 오류")
             self._recalc_log(f"[오류] {e}")

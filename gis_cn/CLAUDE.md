@@ -97,29 +97,32 @@ DB에서 Clip+Intersection을 처리 → QGIS Processing 최소화. Geometry는 
 
 `native:intersection` 실행 후 동일 컬럼명에 숫자 접두어가 붙을 수 있다 (예: `hydro_type` → `2_hydro_type`). `spatial_ops._get_field_value()`에서 `endswith(f"_{target}")` 패턴으로 탐색하여 처리한다.
 
-## UI 구조 (5탭, 2026-06-05 개편)
+## UI 구조 (5탭, 2026-06-29 갱신)
 
-탭 0·2는 `.ui`, 탭 1은 `_setup_mapping_tab()` 동적 삽입, 탭 3은 `.ui` 원래 탭2(이동), **탭 4(보고서 출력)는 `_setup_report_tab()`이 `addTab`으로 신설**.
+탭 0·1·3은 `.ui`, 탭 2(토지이용 재분류)는 `_setup_mapping_tab()`이 `insertTab(2,...)`로 동적 삽입, **탭 4(보고서 출력)는 `_setup_report_tab()`이 `addTab`으로 신설**. 탭 라벨에 단계 번호(①~⑤)와 완료 배지(✓)를 표시(`_refresh_tab_titles`/`_mark_step_done`, `_tab_done` 상태).
 
 | 인덱스 | 탭명 | 위젯명/생성 | 주요 위젯 |
 |--------|------|------------|---------|
-| Tab 0 | 레이어 불러오기 | `tabCnCalc` (.ui) | rbFile/rbLayer, leFilePath, cmbNameField, rbL1/L2/L3, progressBar, txtLog, btnRun, btnClose, btnNextStep0 |
-| Tab 1 | 토지이용 재분류 | `_setup_mapping_tab()` (동적) | tblMapping + 버튼, btnCnRefPopup(CN표 참조 팝업), btnMappingLoadLayer, btnMappingAddRow, btnMappingDeleteRow, btnMappingSave, btnMappingClear, btnNextStep1 |
-| Tab 2 | CN값 편집 | `tabCnEdit` (.ui) | tblCnValues, btnAddRow, btnDeleteRow, btnAddColumn, btnReloadCn(기본값), btnImportCn(불러오기), btnSaveCn(내보내기), btnNextStep2 |
-| Tab 3 | CN값 계산 | `tabRecalc` (.ui) + 동적 | btnApplyCn, **leLayerName(레이어 이름)**, cmbRecalcLayer, txtRecalcLog, **CN값 메모리 관리 카드**(`_save_to_memory`로 이름별 결과 저장, 저장 목록) |
-| Tab 4 | **보고서 출력**(신설) | `_setup_report_tab()` (동적, addTab, `TAB_REPORT=4`) | leOutputDir/btnOutputDir(이동), chkExportExcel/chkExportHwp, chkStaged, **_stage_combos(개발 전/중/후 드롭다운=메모리 선택)**, btnStagedPreview, tblStaged, **btnReportExport(보고서 출력)** (구 btnExportResult1 숨김) |
+| Tab 0 ① | 레이어 불러오기 | `tabCnCalc` (.ui) | rbFile/rbLayer, leFilePath, cmbNameField, rbL1/L2/L3, progressBar, txtLog, btnRun, btnClose, btnNextStep0(→②) |
+| Tab 1 ② | CN값 편집 | `tabCnEdit` (.ui) | tblCnValues, btnAddRow, btnDeleteRow, btnAddColumn, btnReloadCn(기본값), btnImportCn(불러오기), btnSaveCn(내보내기), btnNextStep2(→③) |
+| Tab 2 ③ | 토지이용 재분류 | `_setup_mapping_tab()` (동적 insertTab(2)) | tblMapping + 버튼, btnCnRefPopup(CN표 참조 팝업), btnMappingLoadLayer, btnMappingSave, btnMappingClear, btnNextStep1(→④) |
+| Tab 3 ④ | CN값 계산 | `tabRecalc` (.ui) + 동적 | btnApplyCn, **leLayerName**, cmbRecalcLayer, txtRecalcLog, **CN값 메모리 관리 카드**, **btnNextStep3(→⑤, 2026-06-29 신설)** |
+| Tab 4 ⑤ | **보고서 출력** | `_setup_report_tab()` (동적, addTab, `TAB_REPORT=4`) | leOutputDir/btnOutputDir, chkExportExcel/chkExportHwp, chkStaged, _stage_combos(메모리 선택), btnStagedPreview, tblStaged, **btnReportExport**(+진행바 `_export_progress`/상태 `_export_status`) |
 
 ### 탭 인덱스 상수 (dialog.py)
 ```python
 TAB_CALC    = 0   # 레이어 불러오기
-TAB_MAPPING = 1   # 토지이용 재분류 (insertTab(1,...) 으로 동적 삽입)
-TAB_CN_EDIT = 2   # CN값 편집 (삽입 후 원래 index 1이 2로 이동)
-TAB_RECALC  = 3   # CN값 계산 (원래 .ui의 tab index 2가 3으로 이동)
+TAB_CN_EDIT = 1   # CN값 편집 (.ui 원본 위치 유지)
+TAB_MAPPING = 2   # 토지이용 재분류 (insertTab(2,...) 으로 동적 삽입)
+TAB_RECALC  = 3   # CN값 계산
+TAB_REPORT  = 4   # 보고서 출력 (addTab 으로 추가)
 ```
+> 시각 순서 = 레이어(0)→CN값 편집(1)→토지이용 재분류(2)→CN값 계산(3)→보고서(4). '다음 단계' 버튼(btnNextStep0/2/1/3)이 이 순서대로 0→1→2→3→4 이동.
 
 `_init_ui()` 실행 순서:
-1. `_setup_mapping_tab()` → `insertTab(1, ...)` + `setTabText(3, "CN값 계산")`
+1. `_setup_mapping_tab()` → `insertTab(2, ...)`
 2. `_enhance_recalc_tab()` → `widget(TAB_RECALC).layout().insertWidget(0, card)` 로 CN값 계산 카드 추가
+3. (init 말미) `_refresh_tab_titles()`(번호/배지) + `_add_recalc_next_button()`(④→⑤ 버튼)
 
 ### 탭별 핵심 로직
 - **Tab 1**: `_mapping_load_saved()` → json 로드. `_MappingComboDelegate`로 CN표 드롭다운. `_CnRefDialog` 팝업(검색+더블클릭 자동입력). `_cn_ref_dirty` 플래그로 Tab 2 편집 시 자동 동기화.
@@ -257,6 +260,13 @@ zip OK + XML well-formed + id unique 라도 한글이 거부할 수 있다. 아�
 - `scripts/diag_integrity.py` / `diag_para_diff.py` — 손상/변조 원인(필드 짝·run 구조) 진단, 두 hwpx 단락별 diff.
 - `scripts/render_sample.py [출력]` — 한글 육안 검증용 3단계 샘플 렌더.
 - **시각/열림 확인은 자동화 불가** — 한글에서 직접 열어보는 사용자 육안 게이트 필수(개발 PC COM 은 -2147221005 로 실패).
+
+## 최근 주요 변경 (2026-06-29 추가) — UI 사용성·DB 명세서
+
+- **워크플로우 가독성**: 탭 라벨 단계 번호 ①~⑤ + 완료 배지 ✓(`_refresh_tab_titles`/`_mark_step_done`/`_tab_done`). 레이어 로드·재분류 저장·CN계산·보고서 출력 완료 시 배지, 초기화 시 리셋. **CN값 계산(④)→보고서 출력(⑤) '다음 단계' 버튼(`btnNextStep3`) 신설**.
+- **보고서 출력 스레드화**: `ExportWorker(QThread)` 신설 — 한글/엑셀 렌더(순수 lxml/openpyxl)를 UI 스레드에서 분리해 **출력 중 QGIS 프리징 제거**. QGIS 의존 계산(`calculate_*`/`_staged_build_report`)은 UI 스레드 유지, 렌더만 워커로. 진행바(`_export_progress`, 불확정)+상태 라벨+대기커서, 부분실패 허용 유지. 단일/3단계(`_export_results`/`_export_staged`) 모두 `_run_export_jobs` 경유. (워커 참조는 done 직후 None 처리 안 함 — QThread 조기 파괴 방지)
+- (정정) "UI 구조" 탭 인덱스: 실제는 `TAB_CN_EDIT=1`/`TAB_MAPPING=2`(과거 문서가 1↔2 뒤바뀜).
+- **DB 명세서**: `docs/DB_접속정보_및_테이블_명세서.md`(soil/land_cover 접속·컬럼·쿼리패턴·성능함정). **읽기전용 DB 비밀번호 포함 → PUBLIC 저장소 커밋 금지**, zip 등으로 별도 배포.
 
 ## 최근 주요 변경 (2026-06-29) — 답 AMC3·land_cover 교체+인덱스·안내문구
 
