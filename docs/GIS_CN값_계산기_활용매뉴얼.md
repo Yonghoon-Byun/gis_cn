@@ -148,7 +148,7 @@ mklink /D "%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\gis_cn" "D:\DATA
 | Database | dde-water |
 | Schema | public |
 | 토양군 테이블 | public.soil (hydro_type: A/B/C/D) |
-| 토지피복 테이블 | public.land_cover_yangju (l1/l2/l3 code/name) |
+| 토지피복 테이블 | public.land_cover (l1/l2/l3 code/name) |
 | 좌표계 | EPSG:5186 (Korea TM) |
 
 ---

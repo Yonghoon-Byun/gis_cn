@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 프로젝트 개요
 
-QGIS 3.x 플러그인. 소유역 폴리곤(SHP/GPKG)을 입력받아 PostGIS DB에서 수문학적 토양군(`public.soil`)과 토지피복도(`public.land_cover_yangju`)를 추출한 뒤, 공간 교차 연산(Clip → Intersection)으로 분할된 폴리곤에 CN값을 매칭하여 `CN값_input` 레이어를 생성한다.
+QGIS 3.x 플러그인. 소유역 폴리곤(SHP/GPKG)을 입력받아 PostGIS DB에서 수문학적 토양군(`public.soil`)과 토지피복도(`public.land_cover`)를 추출한 뒤, 공간 교차 연산(Clip → Intersection)으로 분할된 폴리곤에 CN값을 매칭하여 `CN값_input` 레이어를 생성한다.
 
 ## 플러그인 등록
 
@@ -63,7 +63,7 @@ Tab 3 CN값 계산       → ⑤ _build_result_layer → ⑥ 매핑 적용 → �
 - Host: `geo-spatial-hub-prod.postgres.database.azure.com:6432`
 - DB: `dde-water`, Schema: `public`
 - 토양군: `public.soil` — 매칭 컬럼: `hydro_type` (A/B/C/D)
-- 토지피복: `public.land_cover_yangju` — 분류 컬럼: `l1_code/l1_name`, `l2_code/l2_name`, `l3_code/l3_name`
+- 토지피복: `public.land_cover` — 분류 컬럼: `l1_code/l1_name`, `l2_code/l2_name`, `l3_code/l3_name`
 - 기본 SRID: `5186` (EPSG:5186, Korea TM)
 
 ## CN값 매칭 로직
@@ -91,6 +91,7 @@ DB에서 Clip+Intersection을 처리 → QGIS Processing 최소화. Geometry는 
 - **`get_all_layers(wkt, srid, level)`** (권장): 단일 DB 연결 + 임시 테이블로 ①②③ 일괄 처리. clip 중복 제거로 ~40% 속도 향상.
 - `get_soil_layer`/`get_land_cover_layer`/`get_soil_lc_intersection`: 개별 함수 (하위호환용)
 - `_LC_DISSOLVE_COLS`가 level별 dissolve 컬럼 정의
+- **공간필터는 인덱스 친화 형태 필수**: WHERE는 `ST_Intersects(t.geom, w.geom_n)` — `w.geom_n`은 입력 윈도우를 테이블 native SRID(5186)로 **1회 변환한 상수**(CTE). `ST_Transform(w.geom, ST_SRID(t.geom))`처럼 행마다 `ST_SRID(t.geom)`를 부르면 상수로 안 잡혀 GIST 인덱스를 못 쓰고 **전체 Seq Scan** → land_cover(약 4,180만 행)에서 타임아웃. 출력 SELECT는 `ST_Transform(t.geom, %(srid)s)`로 입력 좌표계 출력 유지. (2026-06-29 수정 — land_cover_yangju→land_cover 교체로 표가 커지며 잠복 안티패턴 발현, opus 4에이전트 검증)
 
 ## Intersection 후 컬럼 중복 처리
 
@@ -145,7 +146,7 @@ TAB_RECALC  = 3   # CN값 계산 (원래 .ui의 tab index 2가 3으로 이동)
 
 **토지이용별 (result1 행 단위):**
 - `AMC2_lu` = Σ(area_type × CN_type) / 총면적_lu (가중평균)
-- `AMC3_lu` = 79 (논/답 고정) | `trunc(23×AMC2_lu / (10+0.13×AMC2_lu))` (기타)
+- `AMC3_lu` = 79 (논 고정) | `trunc(23×AMC2_lu / (10+0.13×AMC2_lu))` (답 포함 기타)
 
 **소유역 요약 (result1 합계행, result2):**
 - `AMC2_ws` = Σ(area_lu × CN_lu) / 소유역총면적 (전체 가중평균)
@@ -256,6 +257,14 @@ zip OK + XML well-formed + id unique 라도 한글이 거부할 수 있다. 아�
 - `scripts/diag_integrity.py` / `diag_para_diff.py` — 손상/변조 원인(필드 짝·run 구조) 진단, 두 hwpx 단락별 diff.
 - `scripts/render_sample.py [출력]` — 한글 육안 검증용 3단계 샘플 렌더.
 - **시각/열림 확인은 자동화 불가** — 한글에서 직접 열어보는 사용자 육안 게이트 필수(개발 PC COM 은 -2147221005 로 실패).
+
+## 최근 주요 변경 (2026-06-29) — 답 AMC3·land_cover 교체+인덱스·안내문구
+
+- **답 AMC3 일반식 전환**: `AMC3_FIXED_79 = {'논', '답'}` → `{'논'}`. 논만 AMC3=79 하드코딩 유지, **답은 일반식**(`trunc(23×AMC2/(10+0.13×AMC2))`)으로 계산. 단 `cn_value.xlsx`의 답 CN이 A~D 전부 79라 AMC2=79 → 결과적으로 AMC3=89(고정값 아님, 표값에 종속). 논·답은 동일 지목(벼논)임에 유의.
+- **토지피복 테이블 교체 `land_cover_yangju` → `land_cover`**(운영DB, 전국 약 4,180만 행). `db_manager.py` 3개 SQL + CLAUDE.md + docs 매뉴얼 반영.
+- **clip 쿼리 공간인덱스 복구(중요)**: 기존 `ST_Intersects(t.geom, ST_Transform(w.geom, ST_SRID(t.geom)))`는 행마다 `ST_SRID`라 상수가 아니어서 GIST 인덱스 미사용→전체 Seq Scan. land_cover가 작던(297k) 시절엔 잠복하다 41.8M 교체로 발현(2km 박스도 타임아웃). **수정**: 윈도우를 native 5186으로 1회 변환한 상수 `w.geom_n`을 WHERE에 사용(4함수 6술어). 출력 SELECT는 `ST_Transform(t.geom,%(srid)s)`로 입력 좌표계 보존. opus 4에이전트로 결과동일성·인덱스사용·정합성 검증. (위 "PostGIS 공간 처리" 경고 참조)
+- **재분류 안내 문구**: 토지이용 재분류 탭 안내(`dialog.py` info_lbl)를 불릿 줄구분으로 가독성 개선 + "CN 산정 시 '논'은 79로 고정됩니다." 문구 추가.
+- (참고) DB 진단: soil은 1,169행이지만 폴리곤당 평균 5만/최대 181만 정점(복잡도 병목), land_cover는 41.8M 볼륨 병목. 큰 유역계 최적화(soil ST_Subdivide / 규모 가드)는 보류.
 
 ## 최근 주요 변경 (2026-06-05) — 3단계 보고서/탭 대규모 개편
 

@@ -11,8 +11,8 @@ from .analysis_result import (
 
 logger = logging.getLogger(__name__)
 
-# 논/답은 AMC3 = 79 고정
-AMC3_FIXED_79 = {'논', '답'}
+# 논은 AMC3 = 79 고정 (답은 일반 계산식 적용)
+AMC3_FIXED_79 = {'논'}
 
 
 def _is_null(v) -> bool:
@@ -60,7 +60,7 @@ def layer_to_dataframe(layer: QgsVectorLayer) -> pd.DataFrame:
 
 
 def _amc3(amc2: float, land_use: str) -> int:
-    """AMC3 계산. 논/답 → 79 고정, 기타 → trunc(23×AMC2/(10+0.13×AMC2))."""
+    """AMC3 계산. 논 → 79 고정, 기타(답 포함) → trunc(23×AMC2/(10+0.13×AMC2))."""
     if str(land_use).strip() in AMC3_FIXED_79:
         return 79
     if not amc2 or math.isnan(amc2) or amc2 <= 0:

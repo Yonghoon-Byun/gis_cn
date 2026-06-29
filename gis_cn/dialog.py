@@ -1420,9 +1420,10 @@ class CnCalculatorDialog(QDialog, FORM_CLASS):
         desc_layout.addWidget(icon_lbl)
 
         info_lbl = QLabel(
-            "토지피복도 원본 이름 → 재분류 이름으로 매핑합니다. "
-            "재분류 이름은 CN값 편집 탭의 토지이용분류 목록에서만 선택할 수 있습니다. "
-            "오른쪽 CN표 참조 버튼으로 CN값을 확인할 수 있습니다."
+            "토지피복도 원본 이름 → 재분류 이름으로 매핑합니다.\n"
+            "• 재분류 이름은 'CN값 편집' 탭의 토지이용분류 목록에서만 선택할 수 있습니다.\n"
+            "• 오른쪽 'CN표 참조' 버튼으로 CN값을 확인할 수 있습니다.\n"
+            "• CN 산정 시 '논'은 79로 고정됩니다."
         )
         info_lbl.setWordWrap(True)
         info_lbl.setStyleSheet("color: #854d0e; font-size: 12px; border: none;")

@@ -83,8 +83,12 @@ def get_soil_layer(polygon_geom_wkt: str, srid: int = 5186) -> QgsVectorLayer:
     컬럼: soil_code, hydro_type, hydro_ty_1, k
     """
     sql = """
-        WITH w AS (
+        WITH w0 AS (
             SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom
+        ),
+        w AS (
+            -- geom: 입력 좌표계(출력 교차용) / geom_n: 테이블 native 5186 상수(인덱스 사용 필터용)
+            SELECT geom, ST_Transform(geom, 5186) AS geom_n FROM w0
         )
         SELECT soil_code, hydro_type, hydro_ty_1, k,
                ST_AsBinary(clipped) AS geom
@@ -95,7 +99,7 @@ def get_soil_layer(polygon_geom_wkt: str, srid: int = 5186) -> QgsVectorLayer:
                        3
                    ) AS clipped
             FROM public.soil s, w
-            WHERE ST_Intersects(s.geom, ST_Transform(w.geom, ST_SRID(s.geom)))
+            WHERE ST_Intersects(s.geom, w.geom_n)
         ) t
         WHERE clipped IS NOT NULL
           AND NOT ST_IsEmpty(clipped)
@@ -127,8 +131,12 @@ def get_land_cover_layer(
     컬럼: gid, l1_code, l1_name, l2_code, l2_name, l3_code, l3_name
     """
     sql = """
-        WITH w AS (
+        WITH w0 AS (
             SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom
+        ),
+        w AS (
+            -- geom: 입력 좌표계(출력 교차용) / geom_n: 테이블 native 5186 상수(인덱스 사용 필터용)
+            SELECT geom, ST_Transform(geom, 5186) AS geom_n FROM w0
         )
         SELECT gid, l1_code, l1_name, l2_code, l2_name, l3_code, l3_name,
                ST_AsBinary(clipped) AS geom
@@ -138,8 +146,8 @@ def get_land_cover_layer(
                        ST_Intersection(ST_Transform(l.geom, %(srid)s), w.geom),
                        3
                    ) AS clipped
-            FROM public.land_cover_yangju l, w
-            WHERE ST_Intersects(l.geom, ST_Transform(w.geom, ST_SRID(l.geom)))
+            FROM public.land_cover l, w
+            WHERE ST_Intersects(l.geom, w.geom_n)
         ) t
         WHERE clipped IS NOT NULL
           AND NOT ST_IsEmpty(clipped)
@@ -175,8 +183,12 @@ def get_soil_lc_intersection(
     """
     code_col, name_col = _LC_DISSOLVE_COLS[level]
     sql = f"""
-        WITH w AS (
+        WITH w0 AS (
             SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom
+        ),
+        w AS (
+            -- geom_n: 테이블 native 5186 상수(인덱스 사용 필터용)
+            SELECT geom, ST_Transform(geom, 5186) AS geom_n FROM w0
         ),
         sc AS (
             SELECT soil_code, hydro_type, hydro_ty_1, k,
@@ -185,7 +197,7 @@ def get_soil_lc_intersection(
                        3
                    ) AS geom
             FROM public.soil s, w
-            WHERE ST_Intersects(s.geom, ST_Transform(w.geom, ST_SRID(s.geom)))
+            WHERE ST_Intersects(s.geom, w.geom_n)
         ),
         sc_valid AS (
             SELECT soil_code, hydro_type, hydro_ty_1, k, geom
@@ -198,8 +210,8 @@ def get_soil_lc_intersection(
                        ST_Intersection(ST_Transform(l.geom, %(srid)s), w.geom),
                        3
                    ) AS geom
-            FROM public.land_cover_yangju l, w
-            WHERE ST_Intersects(l.geom, ST_Transform(w.geom, ST_SRID(l.geom)))
+            FROM public.land_cover l, w
+            WHERE ST_Intersects(l.geom, w.geom_n)
         ),
         lc AS (
             SELECT {code_col}, {name_col},
@@ -259,8 +271,9 @@ def get_all_layers(
                    3
                ) AS geom
         FROM public.soil s,
-             (SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom) w
-        WHERE ST_Intersects(s.geom, ST_Transform(w.geom, ST_SRID(s.geom)))
+             (SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom,
+                     ST_Transform(ST_GeomFromText(%(wkt)s, %(srid)s), 5186) AS geom_n) w
+        WHERE ST_Intersects(s.geom, w.geom_n)
     """
 
     sql_lc = f"""
@@ -270,9 +283,10 @@ def get_all_layers(
                    ST_Intersection(ST_Transform(l.geom, %(srid)s), w.geom),
                    3
                ) AS geom
-        FROM public.land_cover_yangju l,
-             (SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom) w
-        WHERE ST_Intersects(l.geom, ST_Transform(w.geom, ST_SRID(l.geom)))
+        FROM public.land_cover l,
+             (SELECT ST_GeomFromText(%(wkt)s, %(srid)s) AS geom,
+                     ST_Transform(ST_GeomFromText(%(wkt)s, %(srid)s), 5186) AS geom_n) w
+        WHERE ST_Intersects(l.geom, w.geom_n)
     """
 
     sql_fetch_soil = """
