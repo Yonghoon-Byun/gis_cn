@@ -24,6 +24,22 @@ QGIS 3.x 플러그인. 소유역 폴리곤(SHP/GPKG)을 입력받아 PostGIS DB�
 
 **참고:** `.prj` 없는 입력의 CRS 미정의 검증은 별개의 일반 개선 항목(경고)일 뿐, 이번 사고 원인은 아님.
 
+## 신규 수문학적토양군 자료(su202607) 검토 (2026-07-07) — 정식 대체 부적합
+
+제공처가 2026-07-06 전달한 신규 토양자료 `su202607.shp`(zip "수문학적토양군 shp20260705.zip")를 기존 `Soil_Type_0905_E5186_Join_K`(soil.zip, `public.soil`의 원천)와 교차검증(코드·DB명세·데이터 3중, opus 4에이전트 워크플로우). **결론: 정식 대체본 부적합.** 상세: 루트 `수문학적토양군_신규자료_검토결과.md`(제공처 회신용), 현황 캡처 `soil.pptx`.
+
+**구조 차이(핵심):**
+- 신규 = HG(A/B/C/D)별 **5개로 dissolve**된 요약 레이어, 총 **34.9M 정점**(단일 피처 최대 13.7M). 기존/DB = **1,169개 per-polygon**.
+- 신규 속성 = `AREA`,`PERIMETER`,`HG`(C,250)뿐. `soil_code`·`hydro_type`·`k` 없음. dissolve는 비가역 → soil_code/K **영구 소실**.
+- 신규 `.prj` = `PCS_ITRF2000_TM`, **EPSG AUTHORITY 없음**(pyproj `to_epsg()=None`). 단 TM 파라미터(CM127/FE200000/FN600000/lat0 38)는 5186과 동일 → 좌표는 수치상 일치. `.cpg`=비표준 토큰 `korean`.
+
+**심각도(로컬모드에서만 신규파일 사용; DB모드는 `public.soil`이라 무관):**
+- **BLOCKER**: 토양군 필드명 `HG`가 `local_data_handler.SOIL_COLUMN_ALIASES`(정확일치, 퍼지 없음)에 없어 로딩 즉시 `ValidationError` → 실행 시작 불가.
+- **DEGRADATION**: 35M 단일 지오메트리로 `native:clip/intersection`(단일스레드 GEOS) 프리즈/메모리 붕괴 위험; 빈 HG('') 피처 → CN NULL; ITRF2000 `.prj` 미해석 → 혼합CRS 빈결과 잠재위험.
+- **COSMETIC(직관 정정)**: `k`/`soil_code`는 코드 전체에서 SELECT만 되고 폐기 → **CN 산출값엔 영향 0**. **dissolve 구조 자체도 CN 결과엔 문제없음**(CN은 hydro_type만 사용, land_cover 교차가 지오메트리 재분할).
+
+**대응:** [정공법] 제공처에 (1)dissolve 이전 per-polygon (2)`hydro_type`+`soil_code`+`k` 속성 (3)EPSG:5186 `.prj` 재요청. [임시] `SOIL_COLUMN_ALIASES`에 `'HG','hg'` 추가 + QGIS에서 5186 재정의 → CN 계산만 가능(성능·속성손실 한계 잔존).
+
 ## 플러그인 등록
 
 QGIS Plugin Manager에서 로드하거나, 플러그인 경로에 심볼릭 링크로 연결한다.
@@ -186,7 +202,7 @@ TAB_REPORT  = 4   # 보고서 출력 (addTab 으로 추가)
 Tab 0 `rbSourceDB`/`rbSourceLocal` 라디오로 데이터 소스 전환. `CnWorker(data_source='db'|'local')`로 분기, 동일 ①②③④ 구조.
 
 **한국어 컬럼 자동 감지**: `SOIL_COLUMN_ALIASES`/`LC_COLUMN_ALIASES`로 canonical↔한국어 매핑. `_resolve_columns()` → 자동 감지, `_rename_columns()` → canonical 리네이밍. 실패 시 `ValidationError`.
-- 토양군 별칭: `hydro_type`, `HYDGRP`, `수문학토양군`, `토양군`, `HSG`
+- 토양군 별칭: `hydro_type`, `HYDGRP`, `수문학토양군`, `토양군`, `HSG` (⚠ 정확일치·퍼지 없음. 신규 su202607의 `HG`는 미포함 → 로딩 즉시 차단, 위 "신규 수문학적토양군 자료(su202607) 검토" 참조)
 - 토지피복도 별칭: `대분류코드/대분류명`, `중분류코드/중분류명`, `세분류코드/세분류명` 등
 
 ## 유역합성 (watershed_group.py + result_calculator.py)
@@ -227,6 +243,7 @@ Tab 0 `rbSourceDB`/`rbSourceLocal` 라디오로 데이터 소스 전환. `CnWork
 ## 알려진 이슈
 
 - **로컬 데이터 컬럼명 불일치**: 한국 정부 SHP 파일은 DB와 다른 컬럼명 사용. alias 매핑으로 해결 중, 실제 기관 데이터 확보 후 검증 필요.
+- **신규 토양자료 su202607 대체 부적합(2026-07-07 검토)**: HG 필드명(별칭 미포함=BLOCKER)·dissolve(5피처/35M정점)·ITRF2000 `.prj`. CN 결과값 자체엔 영향 없으나 로딩·성능·속성보존 문제로 제공처 재요청 필요. 상세는 위 전용 섹션.
 - **CN값 계산 검증 필요**: 유역합성 계산값이 정확한지 기존 엑셀(CN산정 V5)과 비교 검증 예정.
 - **CN 매칭표 ≠ 국가표준 표4-2**: 실제 계산용 `cn_value.xlsx`(13종)가 보고서 표4-18 국가표준표(`data/cn_reference_std.json`, 41행)와 분류·일부 값이 다름(밭 B/C/D, 임야, 초지 등). 현재는 `cn_value.xlsx` 값 보존 방침이며 차이만 문서화(위 "CN값 매칭 로직" 경고 박스 참조). 국가표준 재정합은 고영향 변경이라 보류.
 
